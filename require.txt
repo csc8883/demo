@@ -1,0 +1,1077 @@
+你现在接手的是一个电力杆塔点云航点规划系统。请基于现有代码进行“电力专用语义-几何建模 + 现有禁飞区系统融合”升级。注意：不要重写整个系统，不要破坏现有前端可视化、体素文件读取、候选航点 JSON、航线规划器和禁飞体加载逻辑。
+
+当前系统已经存在以下关键能力：
+
+1. 前端点击“点云栅格化”后，调用 POST /api/process/voxelize。
+2. 后端 main.py 中会构造 Pretreatment 实例，并调用 waypoint_planning/algorithms.py 中 Pretreatment.run()。
+3. Pretreatment.run() 会读取 LAS 点云，得到：
+   - points: shape = (N, 3)
+   - labels: shape = (N,)
+4. 点云分类标签为：
+   - 16：杆塔本体 tower
+   - 22：绝缘子 insulator
+   - 0：导线 conductor
+   - 3：地线 ground_wire
+5. 当前体素化核心函数是 waypoint_planning/planning_core.py 中：
+   - build_semantic_surface_model(points, labels, voxel_size=0.10)
+6. 当前候选视点生成函数是：
+   - generate_candidate_views(surface_model)
+7. 当前输出文件包括：
+   - userdata/{username}/voxel/{base}_voxel.npz
+   - userdata/{username}/voxel/{base}_candidates.json
+8. 当前 .npz 中已有字段：
+   - min_bound
+   - voxel_size
+   - z_max_map
+   - voxels
+   - attention_targets
+   - display_voxels
+   - conductor_no_fly_volumes
+   - safety_points
+   - safety_labels
+   - local_center
+   - meta_json
+9. 当前系统已有 ConductorNoFlyVolume 禁飞体系统。它不是普通包围盒，而是沿导线-地线空间分布构建的定向棱柱体。它已经用于候选视点过滤、航段穿越检测、A* 局部绕行、航点安全修正。因此禁止用新的 wire safety tube 替代它。
+
+本次任务目标：
+
+在不破坏现有架构的前提下，把当前“语义表面体素模型”升级为“电力专用语义-几何可见性模型”，并把现有 ConductorNoFlyVolume 作为最高优先级安全约束整合进候选视点生成与后续可见性/覆盖率数据结构中。
+
+核心原则：
+
+1. 只增强，不推翻。
+2. 旧字段必须保留，新字段可以新增。
+3. ConductorNoFlyVolume 是最高优先级安全模型。
+4. wire_curves / safety_tubes 只能作为辅助几何模型，用于导线/地线细粒度表达、局部距离分析、视觉遮挡判断，以及禁飞体缺失时的 fallback。
+5. 不允许把 safety_distance_m 写死为 3.0m。应优先读取 API / 用户输入参数，其次读取 DEFAULT_LIMITS["safety_distance_m"]，最后才使用 fallback。
+6. 不允许把 no-fly volume 当作视觉遮挡体。禁飞体用于飞行安全；视觉遮挡应由 tower/insulator 几何体、voxel 占据模型、wire_curves 的 occ_radius 判断。
+7. 不能让新增逻辑导致栅格化任务失败。导线不足、绝缘子聚类失败、PCA 失败、候选点过少时都必须有 fallback。
+
+==================================================
+一、请先阅读并理解这些位置
+==================================================
+
+请先定位并阅读：
+
+1. main.py
+   - POST /api/process/voxelize
+   - GET /api/status
+   - GET /api/visualize/result?type=voxel
+
+2. waypoint_planning/algorithms.py
+   - Pretreatment 类
+   - Pretreatment.__init__()
+   - Pretreatment.run()
+   - process_status
+   - update_progress()
+
+3. waypoint_planning/planning_core.py
+   - DEFAULT_LIMITS
+   - ConductorNoFlyVolume dataclass
+   - ConductorNoFlyVolume.contains(position)
+   - ConductorNoFlyVolume.clearance(position)
+   - ConductorNoFlyVolume.segment_intersects(start, end)
+   - build_conductor_no_fly_volumes_from_point_cloud
+   - build_conductor_no_fly_volumes_from_manual_route
+   - _build_conductor_no_fly_volume
+   - _split_conductor_branches
+   - build_semantic_surface_model(points, labels, voxel_size=0.10)
+   - generate_candidate_views(surface_model)
+   - PATCH_BIN_CONFIG
+   - PATCH_CANDIDATE_CONFIG
+   - coverage / visibility / safety 相关函数，如果已有
+
+4. route_planner.py
+   - _load_conductor_no_fly_from_voxel
+   - _segment_is_safe
+   - _segment_crosses_no_fly
+   - _segment_min_no_fly_clearance
+   - _no_fly_detour_path
+   - _find_local_astar_path
+   - _adjust_for_route_constraints
+
+==================================================
+二、总体建模升级目标
+==================================================
+
+请将当前模型升级为：
+
+PowerTowerSemanticGeometricModel
+├── local_frame
+├── target_patches / voxels
+├── display_voxels
+├── attention_targets
+├── insulator_instances
+├── wire_curves
+├── conductor_no_fly_volumes
+├── safety_points / safety_labels
+├── candidate_views
+└── meta_json
+
+其中：
+
+1. 杆塔本体 tower：
+   - 继续保留现有 surface voxel 和 semantic 分类。
+   - 新增“高度层 × 方位扇区”建模。
+   - 每个 tower patch 增加 layer_id、sector_id、radial_normal、area、weight、min_dist、max_dist、max_view_angle_deg。
+   - 用于后续计算塔身分层、分方位覆盖率。
+
+2. 绝缘子 insulator：
+   - 不能只按全局 semantic + 方位 + 高度聚合。
+   - 必须按绝缘子串实例建模。
+   - 对每个绝缘子 cluster 拟合 PCA axis、center、length、radius、bbox。
+   - 对每串绝缘子按 axis 分段，并按环向方向生成高权重目标 cell / patch。
+   - insulator patch 聚合 key 必须包含 insulator_instance_id，避免不同绝缘子串混合。
+
+3. 导线 conductor / 地线 ground_wire：
+   - 继续保留 display_voxels。
+   - 继续保留 conductor_no_fly_volumes。
+   - 新增 wire_curves：polyline + occ_radius + safety_radius。
+   - wire_curves 不替代 no-fly volume，只作为辅助几何模型。
+
+4. 禁飞区 no-fly：
+   - ConductorNoFlyVolume 是主安全模型。
+   - 候选视点必须优先通过 contains() 和 clearance() 过滤。
+   - 航段安全仍交给 route_planner 的 segment_intersects / A* / detour 逻辑。
+   - voxelize 阶段只保证候选点安全，不要试图替代航段绕行。
+
+5. 候选视点 candidates：
+   - 保留当前多距离、多高度偏移、多焦段、多 yaw 偏移机制。
+   - 按语义目标分流生成：
+     a. tower：沿 radial_normal 外扩。
+     b. insulator：沿 outward / ±line_direction / ±z_axis 多角度生成。
+     c. connection targets：生成斜侧视点，避免落入禁飞体。
+   - 每个候选视点新增 target_id、semantic、instance_id、layer_id、sector_id、weight、required_gsd、max_view_angle_deg、no_fly_checked、no_fly_clearance_m 等字段。
+   - 旧字段必须保留。
+
+6. 覆盖率数据结构：
+   - 为后续支持 weighted_coverage 做准备：
+     weighted_coverage = sum(weight_i * area_i * covered_i) / sum(weight_i * area_i)
+   - 每个 target patch / voxel 至少应支持：
+     id, pos, semantic, label, category, weight, area, normal, normal_hint, is_planning_target, min_dist, max_dist, max_view_angle_deg, required_gsd, instance_id, layer_id, sector_id, source
+
+==================================================
+三、配置参数合并要求
+==================================================
+
+请不要新增一套与 DEFAULT_LIMITS 冲突的安全参数。
+
+建议新增或合并配置：
+
+POWER_MODEL_CONFIG = {
+    "power_model_version": "semantic_geometric_v1",
+
+    "tower_layer_height_m": 1.5,
+    "tower_sector_count": 12,
+    "tower_body_weight": 2.0,
+    "tower_edge_weight": 3.0,
+    "tower_top_weight": 3.0,
+    "tower_lower_weight": 0.8,
+    "tower_safety_radius": 2.0,
+
+    "insulator_segments": 6,
+    "insulator_around": 6,
+    "insulator_weight": 5.0,
+    "insulator_min_dist": 2.0,
+    "insulator_max_dist": 8.0,
+    "insulator_max_view_angle_deg": 55.0,
+
+    "wire_occ_radius": 0.10,
+    "wire_safety_radius_from_limits": True,
+
+    "connection_weight": 6.0,
+    "ground_wire_connection_weight": 4.5,
+    "tower_base_weight": 2.0,
+
+    "use_conductor_no_fly_volume": True,
+    "no_fly_required_clearance_mode": "max_safety_and_exterior_clearance",
+    "candidate_filter_min_keep_ratio": 0.10,
+    "candidate_filter_min_count": 20
+}
+
+安全参数来源优先级：
+
+1. API / 用户输入参数。
+2. DEFAULT_LIMITS。
+3. POWER_MODEL_CONFIG fallback。
+
+特别注意：
+
+- wire_safety_radius 不要固定为 3.0。
+- 如果存在 DEFAULT_LIMITS["safety_distance_m"]，wire_safety_radius 默认读取 safety_distance_m。
+- 候选点到禁飞体的 required_clearance 应为：
+  required_clearance = max(
+      safety_distance_m,
+      conductor_no_fly_exterior_clearance_m
+  )
+- conductor_no_fly_exterior_clearance_m 默认从 DEFAULT_LIMITS 读取，通常为 6.5m。
+- safety_distance_m 默认从 DEFAULT_LIMITS 读取，通常为 5.0m。
+
+==================================================
+四、修改 build_semantic_surface_model
+==================================================
+
+请在 planning_core.py 的 build_semantic_surface_model(points, labels, voxel_size=0.10) 中做增强。
+
+要求：
+
+1. 保留原有输入输出结构。
+2. 保留原有 labels 处理：
+   - 16 tower
+   - 22 insulator
+   - 0 conductor
+   - 3 ground_wire
+3. 保留原有 display_voxels、voxels、attention_targets、conductor_no_fly_volumes、safety_points、safety_labels、local_center、meta_json。
+4. 新增字段只追加，不删除旧字段。
+
+--------------------------------------------------
+4.1 新增 local_frame
+--------------------------------------------------
+
+构建杆塔局部坐标系 local_frame：
+
+- z_axis = [0, 0, 1]
+- origin 优先使用当前 local_center 或 tower 中心
+- x_axis 优先级：
+  1. 如果 conductor_no_fly_volumes 非空，使用第一个 no-fly volume 的 u_axis。
+     line_direction_source = "no_fly_volume_u_axis"
+  2. 如果 no-fly volume 不存在但导线点足够，使用导线点 PCA 主方向，并投影到水平面。
+     line_direction_source = "conductor_pca"
+  3. 如果导线点不足，使用杆塔点 XY PCA 主方向 fallback。
+     line_direction_source = "tower_pca_fallback"
+  4. 如果 PCA 失败，使用 [1, 0, 0]。
+     line_direction_source = "default_x_axis"
+- y_axis = cross(z_axis, x_axis)，并归一化。
+- 如果方向归一化失败，必须 fallback，不能抛异常。
+
+surface_model 中新增：
+
+surface_model["local_frame"] = {
+    "origin": [...],
+    "x_axis": [...],
+    "y_axis": [...],
+    "z_axis": [...],
+    "line_direction_source": "..."
+}
+
+meta_json 中也保存 local_frame。
+
+--------------------------------------------------
+4.2 杆塔本体 tower 目标 patch 升级
+--------------------------------------------------
+
+对 label=16 的杆塔表面体素，保留原有 semantic 逻辑：
+
+- tower_top：z_ratio >= 0.78
+- tower_lower30：z_ratio < 0.40
+- tower_edge：26 邻域邻居数 <= 10 或径向距离超过 92 分位数
+- tower_body：其余杆塔体素
+
+但请新增：
+
+1. height_layer_id：
+   - 按 POWER_MODEL_CONFIG["tower_layer_height_m"] 分层，默认 1.5m。
+   - layer_id = floor((z - z_min) / tower_layer_height_m)
+
+2. sector_id：
+   - 以 tower center XY 为中心。
+   - 计算方位角 atan2(y - cy, x - cx)。
+   - 分成 POWER_MODEL_CONFIG["tower_sector_count"] 个扇区，默认 12 个。
+
+3. radial_normal：
+   - 从 tower center XY 指向 voxel / patch center 的水平方向。
+   - z 分量为 0。
+   - 归一化。
+   - 若长度太小，fallback 到 patch.normal_hint 或 local_frame["y_axis"]。
+
+4. area：
+   - 可用体素面积或 patch 近似面积。
+   - 简单实现可设为 voxel_size * voxel_size * count 或 layer_height * arc_length 的近似。
+   - 必须保证 area > 0。
+
+5. weight：
+   - tower_body: 2.0
+   - tower_edge: 3.0
+   - tower_top: 3.0
+   - tower_lower30: 0.8 或 1.0
+
+6. is_planning_target：
+   - tower_lower30 不要彻底丢弃。
+   - 保留到 display_voxels。
+   - 是否作为 planning target 由 is_planning_target 控制。
+   - 默认 tower_lower30 可以作为低权重目标，而不是完全删除。
+
+每个 tower patch / voxel 增加字段：
+
+{
+  "layer_id": int,
+  "sector_id": int,
+  "normal": [nx, ny, nz],
+  "normal_hint": [nx, ny, nz],
+  "area": float,
+  "weight": float,
+  "min_dist": float,
+  "max_dist": float,
+  "max_view_angle_deg": float,
+  "required_gsd": float or null,
+  "is_planning_target": bool,
+  "source": "tower_layer_sector"
+}
+
+建议距离和角度：
+
+- tower_body:
+  min_dist = 4.0
+  max_dist = 16.0
+  max_view_angle_deg = 70.0
+
+- tower_edge:
+  min_dist = 3.5
+  max_dist = 14.0
+  max_view_angle_deg = 65.0
+
+- tower_top:
+  min_dist = 5.0
+  max_dist = 18.0
+  max_view_angle_deg = 70.0
+
+- tower_lower30:
+  min_dist = 4.0
+  max_dist = 16.0
+  max_view_angle_deg = 75.0
+
+--------------------------------------------------
+4.3 绝缘子 insulator 实例化建模
+--------------------------------------------------
+
+当前系统已有绝缘子 26 邻域连通分量聚类，请保留。
+
+在此基础上增强：
+
+1. 对每个 insulator cluster 计算：
+   - insulator_instance_id
+   - center
+   - PCA axis
+   - length
+   - radius
+   - bbox
+   - point_count
+   - z_range
+   - confidence / fallback 标识
+
+2. PCA axis 计算：
+   - 使用 cluster points 的协方差矩阵。
+   - 最大特征值方向作为 axis。
+   - axis 归一化。
+   - 如果 PCA 失败，用 bbox 最大方向 fallback。
+   - 如果仍失败，用 local_frame["x_axis"] fallback。
+
+3. length：
+   - cluster points 投影到 axis 上的 max - min。
+
+4. radius：
+   - 点到 axis 的距离取 80 或 85 分位数。
+   - 如果异常，使用 bbox 次短边的一半 fallback。
+
+5. 给每个绝缘子体素和 patch 增加 insulator_instance_id。
+
+6. Patch 聚合时，insulator 的 key 必须包含 insulator_instance_id，避免不同绝缘子串被合并。
+
+7. 对每个绝缘子实例生成更细 target cells：
+   - 沿 PCA axis 分 n_segments，默认 6。
+   - 环向分 n_around，默认 6。
+   - 每个 cell 有 center、normal、area、weight、instance_id、axial_segment_id、around_id。
+   - weight = 5.0。
+   - min_dist = 2.0。
+   - max_dist = 8.0。
+   - max_view_angle_deg = 55.0。
+   - source = "insulator_axis_ring"。
+
+8. 这些 insulator target cells 可以作为 voxels 的一部分，也可以放入新增 target_cells 字段。
+   - 优先保持 voxels 兼容。
+   - 如果新增 target_cells，也要在 meta_json 中记录 target_cell_count。
+   - 注意前端显示仍依赖 display_voxels，不要破坏 display_voxels。
+
+9. meta_json 中保存：
+
+"insulator_instances": [
+  {
+    "id": int,
+    "center": [x, y, z],
+    "axis": [x, y, z],
+    "length": float,
+    "radius": float,
+    "bbox_min": [...],
+    "bbox_max": [...],
+    "point_count": int,
+    "fallback_used": true/false
+  }
+]
+
+--------------------------------------------------
+4.4 导线 / 地线 wire_curves 建模
+--------------------------------------------------
+
+对 label=0 conductor 和 label=3 ground_wire 分别处理。
+
+保留现有导线/地线粗粒度 display_voxels 和 conductor_no_fly_volumes 逻辑。
+
+新增 wire_curves：
+
+1. wire instance clustering：
+   - 可基于已有导线/地线粗体素做连通域聚类。
+   - 或实现轻量 DBSCAN-like 聚类。
+   - 不要强制引入 sklearn，除非项目已有依赖。
+   - 如果聚类失败，将全部导线点作为一条 conductor curve fallback。
+   - 地线同理。
+
+2. 对每条 wire cluster：
+   - 用 PCA 主方向排序。
+   - 沿主方向分 bin。
+   - 每个 bin 取中位点，形成 polyline。
+   - polyline 点数小于 2 时跳过或 fallback。
+   - 保存 point_count、bbox、length_estimate。
+
+3. 每条 wire curve 字段：
+
+{
+  "id": int,
+  "type": "conductor" or "ground_wire",
+  "polyline": [[x, y, z], ...],
+  "occ_radius": float,
+  "safety_radius": float,
+  "point_count": int,
+  "source": "point_cloud_pca_polyline",
+  "usage": [
+    "auxiliary_occlusion_geometry",
+    "fine_distance_geometry",
+    "fallback_when_no_fly_volume_missing"
+  ]
+}
+
+4. occ_radius 默认 0.10m 或 0.15m。
+5. safety_radius 默认读取 safety_distance_m，不要写死 3.0m。
+6. wire_curves 写入 surface_model。
+7. 尽量写入 .npz 的 wire_curves 字段；如果 object 序列化麻烦，就写入 meta_json。
+
+--------------------------------------------------
+4.5 conductor_no_fly_volumes 与 wire_curves 的关系
+--------------------------------------------------
+
+必须保留 conductor_no_fly_volumes。
+
+如果 conductor_no_fly_volumes 存在：
+- 它是主安全模型。
+- wire_curves 只作为辅助遮挡和局部距离模型。
+
+如果 conductor_no_fly_volumes 不存在：
+- wire_curves 可作为候选点安全过滤 fallback。
+- 但 meta_json 中要记录 warning。
+
+meta_json 新增：
+
+{
+  "safety_model_priority": [
+    "conductor_no_fly_volumes",
+    "wire_curves",
+    "safety_points"
+  ],
+  "no_fly_integrated_with_power_model": true,
+  "no_fly_volume_count": int,
+  "wire_curve_count": int,
+  "wire_curves_usage": "auxiliary_only_when_no_fly_exists"
+}
+
+--------------------------------------------------
+4.6 attention_targets 增强
+--------------------------------------------------
+
+保留当前三类 attention target：
+
+- wire_insulator_connection
+- ground_wire_tower_connection
+- tower_base_connection
+
+每个 attention target 增加字段：
+
+{
+  "weight": float,
+  "normal": [nx, ny, nz],
+  "normal_hint": [nx, ny, nz],
+  "source_part": str,
+  "related_instance_id": int or null,
+  "min_dist": float,
+  "max_dist": float,
+  "max_view_angle_deg": float,
+  "required_gsd": float or null,
+  "is_planning_target": true,
+  "source": "attention_target"
+}
+
+建议权重：
+
+- wire_insulator_connection: 6.0
+- ground_wire_tower_connection: 4.5
+- tower_base_connection: 2.0
+
+normal_hint 必须保留，避免破坏原有候选视点生成。
+
+==================================================
+五、修改 Patch 聚合逻辑
+==================================================
+
+当前系统将 display_voxels 按 (semantic, 方位角 bin, 高度 bin) 聚合为 patches。请修改聚合 key：
+
+1. insulator：
+   - key = (semantic, insulator_instance_id, axial_segment_id, around_id)
+   - 如果 around_id 暂时无法生成，则至少：
+     key = (semantic, insulator_instance_id, height_bin, angle_bin)
+
+2. tower：
+   - key = (semantic, layer_id, sector_id)
+
+3. attention target：
+   - 不要和普通 tower / insulator 混合聚合。
+   - key = (semantic, attention_type, connection_id 或 related_instance_id)
+
+4. conductor / ground_wire：
+   - 默认不作为主要 planning target。
+   - 继续保留 display_voxels。
+   - 如果作为 target，则低权重、稀疏 patch。
+
+每个 patch 输出时补充字段：
+
+{
+  "id": int,
+  "pos": [x, y, z],
+  "label": int,
+  "semantic": str,
+  "category": str,
+  "weight": float,
+  "area": float,
+  "normal": [nx, ny, nz],
+  "normal_hint": [nx, ny, nz],
+  "is_planning_target": bool,
+  "min_dist": float,
+  "max_dist": float,
+  "max_view_angle_deg": float,
+  "required_gsd": float or null,
+  "instance_id": int or null,
+  "insulator_instance_id": int or null,
+  "layer_id": int or null,
+  "sector_id": int or null,
+  "axial_segment_id": int or null,
+  "around_id": int or null,
+  "source": "tower_layer_sector" or "insulator_axis_ring" or "attention_target" or "legacy"
+}
+
+字段不存在时给合理默认值，不能导致旧数据读取失败。
+
+==================================================
+六、修改 generate_candidate_views(surface_model)
+==================================================
+
+请增强 generate_candidate_views(surface_model)，但不要推翻原有多焦段、多距离、多高度偏移、多 yaw 偏移机制。
+
+总体要求：
+
+1. 按 semantic 分流生成候选视点。
+2. 每个候选视点生成后必须经过统一安全过滤。
+3. 安全过滤优先使用 ConductorNoFlyVolume。
+4. 如果过滤过严，必须 fallback，但绝对不能允许候选点落入 no-fly volume 内部。
+5. 输出 candidates.json 时保留旧字段，并新增安全和目标字段。
+
+--------------------------------------------------
+6.1 tower 候选视点
+--------------------------------------------------
+
+对 tower_body / tower_edge / tower_top / tower_lower30：
+
+- 使用 patch.normal 或 patch.normal_hint 作为外侧方向。
+- candidate.position = patch.pos + normal * distance + z_axis * height_offset。
+- yaw / pitch 指向 patch.pos。
+- weight 使用 patch.weight。
+- target_id = patch.id。
+- layer_id / sector_id 继承 patch。
+
+建议距离：
+
+- tower_body: 7m / 10m / 13m
+- tower_edge: 6m / 9m / 12m
+- tower_top: 8m / 12m / 16m
+- tower_lower30: 7m / 10m / 13m
+
+保留原有焦段 F0/F1/F2 和 yaw offset。
+
+--------------------------------------------------
+6.2 insulator 专用候选视点
+--------------------------------------------------
+
+对 insulator patch / target cell：
+
+必须生成专用视点，不要只依赖全塔环绕点。
+
+使用：
+- insulator_instance.center
+- insulator_instance.axis
+- local_frame.x_axis 作为 line_direction
+- local_frame.z_axis
+- tower center 到 insulator center 的 outward direction
+
+每串绝缘子至少生成以下方向：
+
+1. outward 正视
+2. normalize(0.8 * outward + 0.4 * line_direction)
+3. normalize(0.8 * outward - 0.4 * line_direction)
+4. normalize(0.8 * outward + 0.3 * z_axis)
+5. normalize(0.8 * outward - 0.3 * z_axis)
+
+距离建议：
+
+- 4.5m
+- 6.0m
+- 7.5m
+
+每个 candidate：
+- semantic = "insulator"
+- instance_id = insulator_instance_id
+- target_id = patch.id
+- weight = patch.weight or 5.0
+- max_view_angle_deg = 55.0
+- pitch / yaw 指向 insulator cell 或 instance center
+
+绝缘子候选点必须特殊处理禁飞体：
+
+1. 先生成原始 candidate。
+2. 检查 no-fly volume.contains(position)。
+3. 如果落入禁飞体，不要立即放弃，先尝试修正：
+   - 沿远离禁飞体中心方向外推；
+   - 或沿 no_fly_volume.v_axis 的外侧方向外推；
+   - 或沿 z_axis 小幅调整。
+4. 每次步长 0.5m，最多尝试 6 次。
+5. 修正后仍 contains()，则丢弃。
+6. 如果 clearance < required_clearance，继续外推直到满足或达到最大尝试次数。
+7. candidate 中记录：
+
+{
+  "adjusted_for_no_fly": true/false,
+  "adjustment_steps": int,
+  "original_position": [x, y, z] or null
+}
+
+注意：
+- 不能把绝缘子候选视点推到导线-地线之间。
+- wire_insulator_connection 宁可生成更多斜侧视点，也不要在禁飞体内部生成正视点。
+
+--------------------------------------------------
+6.3 connection attention target 候选视点
+--------------------------------------------------
+
+对 wire_insulator_connection：
+
+- 权重最高，建议 6.0。
+- 候选点必须在禁飞体外。
+- 如果正视点被禁飞体过滤，应自动生成两侧斜视点。
+- 斜视方向优先沿 no_fly_volume.v_axis 外侧偏移。
+- 额外增加沿 line_direction 两侧的斜视点。
+- 目标方向指向 connection target。
+
+对 ground_wire_tower_connection：
+
+- 权重 4.5。
+- 候选点容易靠近地线和禁飞体上界。
+- 候选点应优先从禁飞体外侧和略高于目标处观察。
+- 必须检查 clearance。
+
+对 tower_base_connection：
+
+- 权重 2.0。
+- 通常不受导线禁飞体影响，但仍走统一 no-fly filter。
+
+--------------------------------------------------
+6.4 统一候选视点安全过滤
+--------------------------------------------------
+
+请新增统一函数，例如：
+
+filter_candidate_by_safety(candidate, surface_model, limits, allow_adjust=False)
+
+逻辑：
+
+1. 读取 no_fly_volumes：
+   - surface_model["conductor_no_fly_volumes"]
+   - 或 surface_model["no_fly_volumes"]
+   - 保持兼容现有字段名。
+
+2. 读取安全参数：
+   - safety_distance_m
+   - conductor_no_fly_exterior_clearance_m
+   - tower_safety_radius
+
+3. required_clearance = max(
+      safety_distance_m,
+      conductor_no_fly_exterior_clearance_m
+   )
+
+4. 对每个 no_fly_volume：
+
+   a. 如果 volume.contains(candidate.position) 为 True：
+      - 如果 allow_adjust=True，尝试外推修正。
+      - 如果修正失败，丢弃。
+      - 如果 allow_adjust=False，直接丢弃。
+      - contains() 内部永远不能保留。
+
+   b. clearance = volume.clearance(candidate.position)
+      - 如果 clearance < required_clearance：
+        - 如果 allow_adjust=True，尝试外推修正。
+        - 如果修正失败，丢弃或进入 fallback relaxed clearance。
+      - 记录最小 no_fly_clearance_m。
+
+5. fallback relaxed clearance：
+   - 如果严格过滤后候选点过少，例如 final_count < raw_count * 0.10 或 final_count < 20：
+     - 可以放宽 required_clearance 到 safety_distance_m。
+     - 但仍然禁止 contains() 内部点。
+     - 必须在 meta_json 中记录 warning：
+       "fallback_relaxed_clearance_used": true
+
+6. wire_curves 辅助检查：
+   - 如果 no_fly_volumes 不存在，wire_curves 的 safety_radius 作为主安全约束。
+   - 如果 no_fly_volumes 存在，wire_curves 只做补充，避免局部贴近导线。
+   - 到 wire_curves 的距离小于 safety_radius 时，候选点丢弃或修正。
+   - safety_radius 默认读取 safety_distance_m。
+
+7. 塔体安全距离：
+   - 使用 safety_points / safety_labels。
+   - 候选点到 tower / insulator 物理点距离小于 tower_safety_radius 时丢弃。
+   - tower_safety_radius 默认 2.0m，独立于 conductor no-fly safety_distance_m。
+
+8. 每个 candidate 新增字段：
+
+{
+  "no_fly_checked": true,
+  "no_fly_inside": false,
+  "no_fly_clearance_m": float or null,
+  "no_fly_required_clearance_m": float,
+  "safety_filter_source": "conductor_no_fly_volume" or "wire_curve_fallback" or "none",
+  "safety_checked": true,
+  "safety_warning": null or string
+}
+
+==================================================
+七、可见性与覆盖率辅助函数
+==================================================
+
+如果当前已有覆盖评估函数，请在不破坏原函数的基础上新增以下工具函数。没有则新增到 planning_core.py。
+
+请新增：
+
+1. safe_normalize(vec, fallback=None)
+2. pca_main_direction(points, fallback=None)
+3. point_to_segment_distance(p, a, b)
+4. point_to_polyline_distance(p, polyline)
+5. is_point_safe_to_wire_curves(point, wire_curves, safety_radius=None)
+6. ray_blocked_by_wire_curves(start, end, wire_curves)
+7. check_view_angle(viewpoint_pos, target_pos, target_normal, max_angle_deg)
+8. compute_weighted_coverage(visibility_matrix, target_patches)
+9. estimate_patch_area(points_or_count, voxel_size, semantic)
+10. serialize_vector(v)
+11. serialize_wire_curves(wire_curves)
+12. serialize_no_fly_limits(limits)
+
+注意：
+
+- ray_blocked_by_wire_curves 用于视觉遮挡。
+- no_fly_volume 不用于视觉遮挡。
+- point_to_polyline_distance 要处理 polyline 点数小于 2 的情况。
+- 所有函数都要有异常保护，不能因为单条 wire curve 异常导致整个 voxelize 任务失败。
+
+==================================================
+八、飞行安全与视觉遮挡必须区分
+==================================================
+
+请明确区分：
+
+1. 飞行安全约束：
+   - 候选点不能在 no-fly volume 内。
+   - 候选点到 no-fly volume 的 clearance 不能小于 required_clearance。
+   - 航段不能穿越 no-fly volume。
+   - 航段 clearance 不能小于 route planner 的 no-fly margin。
+   - 这是强约束。
+
+2. 视觉可见性约束：
+   - 相机到目标的视线穿过 no-fly volume，不一定代表无人机进入禁飞区。
+   - 因此不要简单把“视线穿过禁飞体”判定为不可见。
+   - 视觉遮挡应由：
+     a. 杆塔/绝缘子 voxel 或 mesh
+     b. wire_curves 的 occ_radius
+     c. 其他物理几何体
+     来判断。
+
+所以：
+- no_fly_volume 用于候选点和航段安全。
+- wire_curves occ_radius 用于导线/地线视觉遮挡。
+- tower / insulator voxel occupancy 用于结构遮挡。
+- 不要把 no_fly_volume 当作大遮挡体。
+
+==================================================
+九、输出文件兼容要求
+==================================================
+
+{base}_voxel.npz 必须继续包含原有字段：
+
+- min_bound
+- voxel_size
+- z_max_map
+- voxels
+- attention_targets
+- display_voxels
+- conductor_no_fly_volumes
+- safety_points
+- safety_labels
+- local_center
+- meta_json
+
+可以新增字段：
+
+- target_cells
+- wire_curves
+- local_frame
+- power_model_meta
+
+如果新增字段导致 np.savez object 序列化复杂，优先写入 meta_json。
+
+meta_json 至少新增：
+
+{
+  "power_model_version": "semantic_geometric_v1",
+  "local_frame": {
+    "origin": [...],
+    "x_axis": [...],
+    "y_axis": [...],
+    "z_axis": [...],
+    "line_direction_source": "..."
+  },
+  "tower_layer_count": int,
+  "tower_sector_count": int,
+  "insulator_instance_count": int,
+  "insulator_instances": [...],
+  "wire_curve_count": int,
+  "wire_curves": [...],
+  "target_cell_count": int,
+  "weighted_target_enabled": true,
+
+  "safety_model_priority": [
+    "conductor_no_fly_volumes",
+    "wire_curves",
+    "safety_points"
+  ],
+  "no_fly_integrated_with_power_model": true,
+  "no_fly_volume_count": int,
+  "no_fly_required_clearance_m": float,
+  "candidate_no_fly_filter_enabled": true,
+  "candidate_no_fly_filter_stats": {
+    "raw_candidate_count": int,
+    "inside_no_fly_rejected": int,
+    "clearance_rejected": int,
+    "wire_curve_rejected": int,
+    "tower_safety_rejected": int,
+    "final_candidate_count": int,
+    "fallback_relaxed_clearance_used": true or false
+  },
+  "warnings": []
+}
+
+{base}_candidates.json 必须保留旧字段，同时新增：
+
+{
+  "target_id": int or null,
+  "semantic": str,
+  "instance_id": int or null,
+  "insulator_instance_id": int or null,
+  "layer_id": int or null,
+  "sector_id": int or null,
+  "weight": float,
+  "required_gsd": float or null,
+  "max_view_angle_deg": float,
+  "source": str,
+
+  "no_fly_checked": true,
+  "no_fly_inside": false,
+  "no_fly_clearance_m": float or null,
+  "no_fly_required_clearance_m": float,
+  "safety_filter_source": str,
+  "safety_checked": true,
+  "adjusted_for_no_fly": true or false,
+  "adjustment_steps": int,
+  "original_position": [x, y, z] or null,
+  "safety_warning": null or str
+}
+
+==================================================
+十、航线规划接口关系
+==================================================
+
+不要在 voxelize 阶段替代 route_planner 的航段安全逻辑。
+
+请确保：
+
+1. 候选视点生成阶段只负责“点安全”。
+2. 航段安全仍由 route_planner 负责。
+3. 排序后的相邻航点如果形成 segment：
+   - 应继续调用 no_fly_volume.segment_intersects(start, end)
+   - 若 segment_intersects 为 True，不要直接连接，应交给现有 A* / detour 逻辑。
+4. 如果 segment 最小 clearance 不足，也交给 route_planner 绕行。
+5. 不要删除或弱化 route_planner.py 中现有：
+   - _segment_is_safe
+   - _segment_crosses_no_fly
+   - _segment_min_no_fly_clearance
+   - _no_fly_detour_path
+   - _find_local_astar_path
+   - _adjust_for_route_constraints
+
+==================================================
+十一、鲁棒性和回退策略
+==================================================
+
+必须实现以下 fallback：
+
+1. 导线点不足：
+   - local_frame.x_axis 使用杆塔 XY PCA fallback。
+   - wire_curves 为空或 fallback。
+   - 系统不能崩。
+
+2. conductor_no_fly_volumes 不存在：
+   - 尝试从 display_voxels 中导线/地线重新构建。
+   - 若仍失败，wire_curves safety_radius 作为候选视点安全 fallback。
+   - meta_json 写入 warning。
+
+3. 绝缘子聚类失败：
+   - 将全部绝缘子点作为一个 insulator instance。
+   - 或退回 legacy insulator patch 逻辑。
+   - 系统不能崩。
+
+4. PCA 失败：
+   - 使用 bbox 主方向。
+   - 再失败使用 local_frame.x_axis。
+   - 不能让任务失败。
+
+5. 新增字段缺失：
+   - generate_candidate_views 必须使用旧字段 fallback。
+
+6. 候选点过少：
+   - 如果严格 no-fly clearance 过滤后候选数量过少，可以放宽 clearance 到 safety_distance_m。
+   - 但 contains() 内部永远禁止。
+   - meta_json 记录 warning。
+
+7. 保存 .npz 失败：
+   - 如果新增 object 字段无法序列化，复杂新增信息转存 meta_json。
+   - 原有字段必须继续保存。
+
+==================================================
+十二、测试要求
+==================================================
+
+修改完成后，请执行或新增基本测试：
+
+1. 用现有 LAS 数据跑一次点云栅格化，确认不报错。
+2. 检查 {base}_voxel.npz 中原字段仍存在：
+   - min_bound
+   - voxel_size
+   - z_max_map
+   - voxels
+   - attention_targets
+   - display_voxels
+   - conductor_no_fly_volumes
+   - safety_points
+   - safety_labels
+   - local_center
+   - meta_json
+
+3. 检查 meta_json 中新增：
+   - power_model_version
+   - local_frame
+   - insulator_instances
+   - wire_curves
+   - safety_model_priority
+   - no_fly_integrated_with_power_model
+   - candidate_no_fly_filter_stats
+
+4. 检查 voxels 中至少部分 patch 含有：
+   - weight
+   - area
+   - normal
+   - normal_hint
+   - min_dist
+   - max_dist
+   - max_view_angle_deg
+   - instance_id / layer_id / sector_id
+
+5. 检查 {base}_candidates.json：
+   - 文件存在
+   - candidates 数量不为 0
+   - 每个候选点保留旧字段
+   - 新候选点含 no_fly_checked、no_fly_clearance_m、weight、semantic 等字段
+
+6. 检查候选点安全：
+   - 没有候选点落入任何 ConductorNoFlyVolume.contains() 内。
+   - 候选点 clearance 基本满足 required_clearance。
+   - 如果 fallback relaxed clearance 被启用，meta_json 中有 warning。
+
+7. 检查前端：
+   - GET /api/visualize/result?type=voxel 仍能正常显示 display_voxels。
+   - 颜色、点大小、透明度等旧逻辑不受影响。
+
+8. 检查 PlanningEnvironment：
+   - 能正常加载旧 npz。
+   - 能正常加载新 npz。
+   - conductor_no_fly_volumes 不丢失。
+
+9. 检查 route_planner：
+   - 仍能读取 conductor_no_fly_volumes。
+   - segment_intersects / A* / detour 逻辑不受破坏。
+   - 航段穿越禁飞体时仍能触发绕行。
+
+==================================================
+十三、请输出修改报告
+==================================================
+
+完成代码修改后，请输出一份修改报告，包含：
+
+1. 修改了哪些文件。
+2. 新增了哪些函数。
+3. 修改了哪些函数。
+4. 新增了哪些数据结构。
+5. 新增字段说明。
+6. 如何保持旧字段兼容。
+7. 如何回退到 legacy 行为。
+8. 如何验证运行结果。
+9. 本次修改还有哪些 TODO。
+10. 是否存在潜在风险，比如候选点被过滤过多、绝缘子实例聚类不稳定、wire_curves 与 no-fly volume 方向不一致等。
+
+==================================================
+十四、非常重要的实现边界
+==================================================
+
+请特别注意：
+
+1. 不要删除旧字段。
+2. 不要改坏前端 display_voxels 可视化。
+3. 不要让 wire_curves 替代 conductor_no_fly_volumes。
+4. 不要把 no-fly volume 当作视觉遮挡体。
+5. 不要把 safety_distance_m 写死成 3.0m。
+6. 不要在 voxelize 阶段替代 route_planner 的航段绕行。
+7. 不要因为新增模型失败导致整个栅格化失败。
+8. 所有新增逻辑都必须有 fallback。
+9. 修改后必须保证 {base}_voxel.npz 和 {base}_candidates.json 仍可被现有后续流程读取。
+
+最终目标：
+
+在当前系统基础上，实现一个更科学、更严谨、更贴合电力场景的“语义-几何-禁飞约束联合模型”：
+
+- 杆塔本体：高度层 × 方位扇区目标模型；
+- 绝缘子：实例化高权重目标模型；
+- 导线/地线：wire_curves 辅助几何模型；
+- 禁飞区：继续使用 ConductorNoFlyVolume 作为最高优先级安全模型；
+- 候选视点：按语义目标生成，并经过 no-fly volume 安全过滤；
+- 覆盖率：支持后续加权覆盖率和部件级覆盖率计算；
+- 航线规划：继续由现有 route_planner 负责航段安全和绕行。

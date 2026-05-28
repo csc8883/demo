@@ -1,0 +1,9 @@
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+python-multipart==0.0.28
+jinja2==3.1.6
+numpy==2.2.6
+laspy==2.7.0
+lazrs==0.8.1
+utm==0.8.1
+pydantic==2.13.4

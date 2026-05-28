@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef2ff"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#94a3b8" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#94a3b8" stop-opacity="0.22"/>
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#line)" stroke-width="2">
+    <path d="M-50,160 C250,40 420,260 720,140 C980,30 1180,220 1460,120 C1680,40 1840,120 1980,60"/>
+    <path d="M-80,260 C240,120 430,360 720,250 C990,140 1190,330 1470,220 C1680,150 1850,220 1990,170"/>
+    <path d="M-60,360 C260,240 420,460 720,360 C1000,260 1180,440 1470,340 C1700,270 1840,340 1990,300"/>
+    <path d="M-80,470 C240,360 430,560 720,470 C990,370 1190,550 1470,470 C1680,410 1850,470 1990,450"/>
+    <path d="M-60,590 C260,470 420,660 720,600 C1000,510 1180,690 1470,600 C1700,550 1840,610 1990,590"/>
+    <path d="M-80,720 C240,610 430,780 720,730 C990,660 1190,820 1470,760 C1680,720 1850,760 1990,740"/>
+    <path d="M-60,850 C260,760 420,900 720,860 C1000,820 1180,940 1470,910 C1700,880 1840,900 1990,890"/>
+  </g>
+  <circle cx="1350" cy="270" r="260" fill="#60a5fa" opacity="0.10"/>
+</svg>

@@ -1,0 +1,7 @@
+users.json
+logs/
+.idea/
+__pycache__/
+.env*
+userdata/
+.claude/settings.local.json
