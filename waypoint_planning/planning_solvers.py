@@ -14,19 +14,28 @@ import numpy as np
 from .planning_core import (
     AIMTYPE_VIEW_PROFILE,
     ATTENTION_SEMANTICS,
+    CAMERA_SENSOR_HEIGHT_MM,
+    CAMERA_SENSOR_WIDTH_MM,
+    COMPACT_COVERAGE_THRESHOLDS,
     COVERAGE_THRESHOLDS,
     DEFAULT_LIMITS,
+    ENABLE_OBSERVABILITY_GAP_REPAIR,
     REPAIR_PRIORITY,
+    REQUIRED_RESOLUTION,
     SEMANTIC_PRIORITY,
     SUPPORTED_FOCALS,
     CandidateViewpoint,
     PlanningEnvironment,
     VisibilityEngine,
     _normalize_semantic,
+    choose_focal_length_eq_mm,
+    compact_coverage_thresholds_met,
+    compute_view_geometry,
     compute_waypoint_metrics,
     coverage_thresholds_met,
     load_candidate_views,
     parse_manual_route,
+    required_no_fly_clearance_m,
 )
 from .waypoint_models import WaypointPlanningInput, WaypointResult, build_waypoint_result
 
@@ -99,6 +108,7 @@ class BasePlanner:
         self.manual_waypoint_min: Optional[int] = None
         self.manual_waypoint_max: Optional[int] = None
         self.supplement_added_ids: set[int] = set()
+        self.multi_shot_enrichment_added_ids: set[int] = set()
         self.solution_supplement_ids: Dict[Tuple[int, ...], set[int]] = {}
         self.manual_waypoint_limit_overridden = False
         self.key_cluster_counts: Dict[str, Dict[str, int]] = {}
@@ -115,16 +125,9 @@ class BasePlanner:
             )
             or DEFAULT_LIMITS["conductor_no_fly_boundary_tolerance_m"]
         )
-        self.conductor_no_fly_clearance_m = max(
-            float(
-                getattr(
-                    constraints,
-                    "conductor_no_fly_clearance_m",
-                    self.safety_distance_m * 0.5,
-                )
-                or self.safety_distance_m * 0.5
-            ),
-            0.0,
+        self.conductor_no_fly_clearance_m = required_no_fly_clearance_m(
+            self.safety_distance_m,
+            getattr(constraints, "conductor_no_fly_clearance_m", None),
         )
         self.manual_ratio_min = max(0.0, min(0.80, float(constraints.manual_ratio_min or DEFAULT_LIMITS["manual_ratio_min"])))
         self.manual_ratio_max = max(
@@ -162,7 +165,7 @@ class BasePlanner:
             self.max_total_shots = int(constraints.max_total_shots)
         if constraints.max_shots_per_waypoint is not None:
             self.max_shots_per_waypoint = int(constraints.max_shots_per_waypoint)
-        self.max_shots_per_waypoint = max(1, min(3, self.max_shots_per_waypoint))
+        self.max_shots_per_waypoint = max(1, min(2, self.max_shots_per_waypoint))
 
     def progress(self, percent: int, message: str):
         if self.progress_callback:
@@ -242,7 +245,10 @@ class BasePlanner:
 
     def _prepare_candidates(self):
         assert self.env is not None and self.engine is not None
-        scored_by_semantic: Dict[str, List[Tuple[float, CandidateViewpoint]]] = {semantic: [] for semantic in SEMANTIC_PRIORITY}
+        safe_candidates: List[CandidateViewpoint] = []
+        self.gap_repair_candidates_loaded = int(
+            sum(1 for candidate in self.candidates if getattr(candidate, "source", "") == "observability_gap_repair")
+        )
         total = max(len(self.candidates), 1)
         for index, candidate in enumerate(self.candidates, start=1):
             if self.conductor_no_fly_enabled and self.env.inside_conductor_no_fly(
@@ -250,17 +256,101 @@ class BasePlanner:
                 tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
             ):
                 continue
-            if self.conductor_no_fly_enabled and self.env.min_conductor_no_fly_clearance(candidate.position) < self.conductor_no_fly_clearance_m:
+            no_fly_clearance = self.env.min_conductor_no_fly_clearance(candidate.position)
+            candidate.no_fly_clearance_m = (
+                float(no_fly_clearance)
+                if math.isfinite(float(no_fly_clearance))
+                else None
+            )
+            candidate.no_fly_required_clearance_m = float(self.conductor_no_fly_clearance_m)
+            if self.conductor_no_fly_enabled and no_fly_clearance + 1e-9 < self.conductor_no_fly_clearance_m:
                 continue
             safety_distance = self.env.min_safety_distance(candidate.position, self.safety_distance_m)
             candidate.safety_distance_m = safety_distance
             if safety_distance < self.safety_distance_m:
                 continue
+            safe_candidates.append(candidate)
+            if index % 50 == 0 or index == total:
+                self.progress(5 + int(7 * index / total), f"filter safe candidates {index}/{total}...")
+
+        self.env.update_observability_from_candidates(
+            self.engine,
+            safe_candidates,
+            safety_distance_m=self.safety_distance_m,
+            conductor_no_fly_enabled=self.conductor_no_fly_enabled,
+            conductor_no_fly_clearance_m=self.conductor_no_fly_clearance_m,
+            conductor_no_fly_boundary_tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
+        )
+        self.initial_safe_candidate_count = int(len(safe_candidates))
+        self.gap_repair_candidates_safe = int(
+            sum(1 for candidate in safe_candidates if getattr(candidate, "source", "") == "observability_gap_repair")
+        )
+        repair_candidates: List[CandidateViewpoint] = []
+        if ENABLE_OBSERVABILITY_GAP_REPAIR:
+            repair_candidates = self.env.build_observability_gap_repair_candidates(
+                safe_candidates,
+                self.engine,
+                safety_distance_m=self.safety_distance_m,
+                conductor_no_fly_enabled=self.conductor_no_fly_enabled,
+                conductor_no_fly_clearance_m=self.conductor_no_fly_clearance_m,
+                conductor_no_fly_boundary_tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
+            )
+            if repair_candidates:
+                safe_candidates.extend(repair_candidates)
+                self.gap_repair_candidates_loaded += int(len(repair_candidates))
+                self.gap_repair_candidates_safe += int(len(repair_candidates))
+                self.env.update_observability_from_candidates(
+                    self.engine,
+                    safe_candidates,
+                    safety_distance_m=self.safety_distance_m,
+                    conductor_no_fly_enabled=self.conductor_no_fly_enabled,
+                    conductor_no_fly_clearance_m=self.conductor_no_fly_clearance_m,
+                    conductor_no_fly_boundary_tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
+                )
+        self.gap_repair_candidate_count = int(len(repair_candidates))
+        self.position_group_merge_count = self._merge_nearby_candidate_positions(safe_candidates, radius_m=1.2)
+        self.env.update_observability_from_candidates(
+            self.engine,
+            safe_candidates,
+            safety_distance_m=self.safety_distance_m,
+            conductor_no_fly_enabled=self.conductor_no_fly_enabled,
+            conductor_no_fly_clearance_m=self.conductor_no_fly_clearance_m,
+            conductor_no_fly_boundary_tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
+        )
+        if ENABLE_OBSERVABILITY_GAP_REPAIR and int(
+            self.env.target_observability_stats.get("reason_counts", {}).get("candidate_generation_gap", 0)
+        ) > 0:
+            second_pass_repairs = self.env.build_observability_gap_repair_candidates(
+                safe_candidates,
+                self.engine,
+                safety_distance_m=self.safety_distance_m,
+                conductor_no_fly_enabled=self.conductor_no_fly_enabled,
+                conductor_no_fly_clearance_m=self.conductor_no_fly_clearance_m,
+                conductor_no_fly_boundary_tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
+            )
+            if second_pass_repairs:
+                safe_candidates.extend(second_pass_repairs)
+                self.gap_repair_candidate_count += int(len(second_pass_repairs))
+                self.gap_repair_candidates_loaded += int(len(second_pass_repairs))
+                self.gap_repair_candidates_safe += int(len(second_pass_repairs))
+                self.env.update_observability_from_candidates(
+                    self.engine,
+                    safe_candidates,
+                    safety_distance_m=self.safety_distance_m,
+                    conductor_no_fly_enabled=self.conductor_no_fly_enabled,
+                    conductor_no_fly_clearance_m=self.conductor_no_fly_clearance_m,
+                    conductor_no_fly_boundary_tolerance_m=self.conductor_no_fly_boundary_tolerance_m,
+                )
+
+        scored_by_semantic: Dict[str, List[Tuple[float, CandidateViewpoint]]] = {semantic: [] for semantic in SEMANTIC_PRIORITY}
+        total_safe = max(len(safe_candidates), 1)
+        for index, candidate in enumerate(safe_candidates, start=1):
             visible = self.engine.candidate_visible_indices(candidate)
             attention_visible = self.engine.candidate_visible_attention_indices(candidate)
-            if len(visible) == 0 and len(attention_visible) == 0:
+            effective_visible = visible[self.env.effective_target_mask[visible]] if len(visible) else np.array([], dtype=int)
+            if len(effective_visible) == 0 and len(attention_visible) == 0:
                 continue
-            weights = float(np.sum(self.env.weights[visible]))
+            weights = float(np.sum(self.env.weights[effective_visible]))
             # ── Quality penalty for overview / resolution-skipped views ──
             quality_factor = 0.12 if getattr(candidate, "aim_type", None) == "tower_overview" else 1.0
             semantic_bonus = 0.0
@@ -271,18 +361,24 @@ class BasePlanner:
                         1,
                     )
                 else:
-                    semantic_bonus += priority * float(np.sum(self.env.semantics[visible] == semantic)) / max(self.env.semantic_totals.get(semantic, 1), 1)
+                    semantic_bonus += priority * float(np.sum(self.env.semantics[effective_visible] == semantic)) / max(
+                        self.env.effective_semantic_totals.get(semantic, 1),
+                        1,
+                    )
+            safety_distance = float(candidate.safety_distance_m or self.env.min_safety_distance(candidate.position, self.safety_distance_m))
             safety_margin = min(max((safety_distance - self.safety_distance_m) / max(self.safety_distance_m, 1e-6), 0.0), 1.0)
             candidate.base_score = (
-                quality_factor * weights / max(self.env.total_weight, 1e-9)
+                quality_factor * weights / max(self.env.effective_total_weight, 1e-9)
                 + 0.2 * semantic_bonus
                 + 0.22 * float(candidate.manual_priority)
                 + 0.04 * safety_margin
             )
+            if getattr(candidate, "source", "") == "observability_gap_repair":
+                candidate.base_score += 0.08
             semantic_key = candidate.semantic_focus if candidate.semantic_focus in scored_by_semantic else "tower_body"
             scored_by_semantic[semantic_key].append((candidate.base_score, candidate))
-            if index % 50 == 0 or index == total:
-                self.progress(5 + int(15 * index / total), f"预计算候选视点 {index}/{total}...")
+            if index % 50 == 0 or index == total_safe:
+                self.progress(12 + int(8 * index / total_safe), f"prepare candidates {index}/{total_safe}...")
 
         if not any(scored_by_semantic.values()):
             raise ValueError("候选视点没有任何有效覆盖，无法规划")
@@ -301,13 +397,32 @@ class BasePlanner:
         kept: List[CandidateViewpoint] = []
         for semantic, entries in scored_by_semantic.items():
             entries.sort(key=lambda item: item[0], reverse=True)
-            kept.extend(candidate for _, candidate in entries[: semantic_keep.get(semantic, 180)])
+            semantic_limit = semantic_keep.get(semantic, 180)
+            selected_for_semantic: Dict[int, CandidateViewpoint] = {
+                candidate.id: candidate for _, candidate in entries[:semantic_limit]
+            }
+            repair_entries = [
+                candidate for _, candidate in entries
+                if getattr(candidate, "source", "") == "observability_gap_repair"
+            ]
+            for candidate in repair_entries[: min(len(repair_entries), max(60, semantic_limit // 3))]:
+                selected_for_semantic.setdefault(candidate.id, candidate)
+            kept.extend(selected_for_semantic.values())
 
         if len(kept) > self.max_candidate_pool:
-            kept.sort(key=lambda candidate: candidate.base_score, reverse=True)
+            kept.sort(
+                key=lambda candidate: (
+                    getattr(candidate, "source", "") == "observability_gap_repair",
+                    candidate.base_score,
+                ),
+                reverse=True,
+            )
             kept = kept[: self.max_candidate_pool]
         self.candidates = kept
         self.candidate_map = {candidate.id: candidate for candidate in self.candidates}
+        self.gap_repair_candidates_kept = int(
+            sum(1 for candidate in self.candidates if getattr(candidate, "source", "") == "observability_gap_repair")
+        )
 
     def _sync_position_groups(self):
         grouped: Dict[int, List[int]] = {}
@@ -323,11 +438,137 @@ class BasePlanner:
             )
         self.position_candidate_ids = grouped
 
+    def _target_signature(self, candidate: CandidateViewpoint) -> Tuple[object, ...]:
+        if getattr(candidate, "target_id", None) is not None:
+            return ("target", int(candidate.target_id))
+        target = np.asarray(candidate.look_at if candidate.look_at is not None else candidate.target_center, dtype=float)
+        return (
+            "look_at",
+            str(candidate.semantic_focus),
+            round(float(target[0]), 2),
+            round(float(target[1]), 2),
+            round(float(target[2]), 2),
+        )
+
+    def _refresh_candidate_view_geometry(self, candidate: CandidateViewpoint) -> None:
+        look_at = np.asarray(candidate.look_at if candidate.look_at is not None else candidate.target_center, dtype=float)
+        geom = compute_view_geometry(candidate.position, look_at)
+        candidate.yaw = float(geom["heading"])
+        candidate.heading = float(geom["heading"])
+        candidate.base_heading = float(geom["heading"])
+        candidate.pitch = max(-85.0, min(25.0, float(geom["pitch"])))
+        candidate.distance = float(geom["Distance"])
+        aim_type = getattr(candidate, "aim_type", None) or candidate.semantic_focus
+        req_resolution = (
+            float(candidate.required_resolution)
+            if getattr(candidate, "required_resolution", None) is not None
+            else float(REQUIRED_RESOLUTION.get(_normalize_semantic(candidate.semantic_focus), 0.7))
+        )
+        focal = choose_focal_length_eq_mm(
+            aim_type=aim_type,
+            distance=float(candidate.distance),
+            required_resolution=req_resolution,
+        )
+        if focal is None:
+            focal = float(candidate.f_eq_mm or 48.0)
+        focal = max(24.0, min(84.0, float(focal)))
+        candidate.focal_length_eq_mm = focal
+        candidate.f_eq_mm = focal
+        focal_level, _ = next(
+            iter(sorted(SUPPORTED_FOCALS.items(), key=lambda item: abs(float(item[1]["f_eq_mm"]) - focal)))
+        )
+        candidate.focal_level = focal_level
+        candidate.hfov_deg = math.degrees(2.0 * math.atan(CAMERA_SENSOR_WIDTH_MM / (2.0 * focal)))
+        candidate.vfov_deg = math.degrees(2.0 * math.atan(CAMERA_SENSOR_HEIGHT_MM / (2.0 * focal)))
+
+    def _merge_nearby_candidate_positions(self, candidates: List[CandidateViewpoint], radius_m: float = 1.2) -> int:
+        """Merge nearby safe candidate positions into physical waypoint groups."""
+        if not candidates:
+            return 0
+        ordered = sorted(
+            candidates,
+            key=lambda candidate: (
+                -float(candidate.base_score),
+                -SEMANTIC_PRIORITY.get(candidate.semantic_focus, 0),
+                int(candidate.position_id),
+            ),
+        )
+        groups: List[Dict[str, object]] = []
+        for candidate in ordered:
+            assigned = False
+            for group in groups:
+                rep = np.asarray(group["position"], dtype=float)
+                if float(np.linalg.norm(candidate.position - rep)) > radius_m:
+                    continue
+                candidate.position = rep.copy()
+                candidate.position_id = int(group["position_id"])
+                self._refresh_candidate_view_geometry(candidate)
+                assigned = True
+                break
+            if assigned:
+                continue
+            group_id = len(groups) + 1
+            candidate.position_id = group_id
+            groups.append({"position_id": group_id, "position": np.asarray(candidate.position, dtype=float).copy()})
+        if self.engine is not None:
+            self.engine.cache.clear()
+            self.engine.attention_cache.clear()
+        return max(len(candidates) - len(groups), 0)
+
+    def _effective_new_indices(self, indices: np.ndarray, covered_mask: np.ndarray) -> np.ndarray:
+        assert self.env is not None
+        if len(indices) == 0:
+            return np.array([], dtype=int)
+        effective_mask = self.env.effective_target_mask[indices]
+        uncovered_mask = ~covered_mask[indices]
+        return indices[np.logical_and(effective_mask, uncovered_mask)]
+
+    def _effective_semantic_total(self, semantic: str) -> int:
+        assert self.env is not None
+        return max(int(self.env.effective_semantic_totals.get(semantic, 0)), 1)
+
+    def _effective_weight_total(self) -> float:
+        assert self.env is not None
+        return max(float(self.env.effective_total_weight), 1e-9)
+
     def _position_counts(self, selected_ids: Sequence[int]) -> Counter:
         return Counter(self.candidate_map[candidate_id].position_id for candidate_id in selected_ids if candidate_id in self.candidate_map)
 
     def _selected_waypoint_count(self, selected_ids: Sequence[int]) -> int:
         return len(set(self.candidate_map[candidate_id].position_id for candidate_id in selected_ids if candidate_id in self.candidate_map))
+
+    def _candidate_aim_limit(self, candidate: CandidateViewpoint) -> Tuple[Optional[int], Optional[Tuple[object, ...]]]:
+        aim_type = getattr(candidate, "aim_type", None)
+        if not aim_type:
+            return None, None
+        aim_profile = AIMTYPE_VIEW_PROFILE.get(aim_type, {})
+        if aim_profile.get("max_final_waypoints"):
+            return int(aim_profile["max_final_waypoints"]), ("aim", aim_type)
+        if aim_profile.get("max_final_per_instance"):
+            instance_key = (
+                getattr(candidate, "instance_id", None)
+                if getattr(candidate, "instance_id", None) is not None
+                else getattr(candidate, "target_id", None)
+            )
+            if instance_key is None:
+                instance_key = getattr(candidate, "target_cluster_id", None) or tuple(
+                    round(float(v), 2) for v in np.asarray(candidate.target_center, dtype=float)
+                )
+            return int(aim_profile["max_final_per_instance"]), ("instance", aim_type, instance_key)
+        if aim_profile.get("max_final_per_target"):
+            target_key = (
+                getattr(candidate, "target_id", None)
+                if getattr(candidate, "target_id", None) is not None
+                else getattr(candidate, "target_cluster_id", None)
+            )
+            if target_key is None:
+                target_key = tuple(round(float(v), 2) for v in np.asarray(candidate.target_center, dtype=float))
+            return int(aim_profile["max_final_per_target"]), ("target", aim_type, target_key)
+        return None, None
+
+    def _candidate_matches_aim_scope(self, candidate: CandidateViewpoint, scope: Tuple[object, ...]) -> bool:
+        _, candidate_scope = self._candidate_aim_limit(candidate)
+        return candidate_scope == scope
 
     def _last_position(self, selected_ids: Sequence[int]) -> Optional[np.ndarray]:
         if not selected_ids:
@@ -345,17 +586,15 @@ class BasePlanner:
         if len(selected_ids) >= self.max_total_shots:
             return False
         # ── Enforce AIMTYPE_VIEW_PROFILE max_final constraints ──
-        cand_aim = getattr(candidate, "aim_type", None)
-        if cand_aim:
-            aim_profile = AIMTYPE_VIEW_PROFILE.get(cand_aim, {})
-            max_final = aim_profile.get("max_final_waypoints") or aim_profile.get("max_final_per_target") or aim_profile.get("max_final_per_instance")
-            if max_final:
-                same_aim_count = sum(
-                    1 for cid in selected_ids
-                    if getattr(self.candidate_map.get(cid), "aim_type", None) == cand_aim
-                )
-                if same_aim_count >= int(max_final):
-                    return False
+        max_final, scope = self._candidate_aim_limit(candidate)
+        if max_final and scope:
+            same_scope_count = sum(
+                1
+                for cid in selected_ids
+                if cid in self.candidate_map and self._candidate_matches_aim_scope(self.candidate_map[cid], scope)
+            )
+            if same_scope_count >= int(max_final):
+                return False
         return True
 
     def _evaluate_increment(
@@ -369,7 +608,7 @@ class BasePlanner:
         visible = self.engine.candidate_visible_indices(candidate)
         if len(visible) == 0:
             return None
-        new_indices = visible[~covered_mask[visible]]
+        new_indices = self._effective_new_indices(visible, covered_mask)
         if len(new_indices) == 0:
             return None
 
@@ -384,10 +623,10 @@ class BasePlanner:
                 total = max(self.env.attention_totals.get(semantic, 0), 1)
                 attention_deltas[semantic] = float(np.sum(attention_semantics == semantic) / total)
                 attention_score += SEMANTIC_PRIORITY.get(semantic, 0) * attention_deltas[semantic]
-        weighted_delta = float(np.sum(weights) / max(self.env.total_weight, 1e-9))
+        weighted_delta = float(np.sum(weights) / self._effective_weight_total())
         semantic_deltas = {}
         for semantic in SEMANTIC_PRIORITY:
-            total = max(self.env.semantic_totals.get(semantic, 0), 1)
+            total = self._effective_semantic_total(semantic)
             semantic_deltas[semantic] = float(np.sum(semantics == semantic) / total)
 
         position_counts = self._position_counts(selected_ids)
@@ -454,8 +693,9 @@ class BasePlanner:
         for semantic, priority in SEMANTIC_PRIORITY.items():
             if semantic == "tower_body":
                 priority = 0.35
-            total = max(self.env.semantic_totals.get(semantic, 0), 1)
-            uncovered = int(np.sum(np.logical_and(self.env.semantics == semantic, ~covered_mask)))
+            semantic_mask = np.logical_and(self.env.semantics == semantic, self.env.effective_target_mask)
+            total = max(int(np.sum(semantic_mask)), 1)
+            uncovered = int(np.sum(np.logical_and(semantic_mask, ~covered_mask)))
             priorities[semantic] = priority * float(uncovered / total)
         return priorities
 
@@ -515,10 +755,10 @@ class BasePlanner:
         )
         focus_gain = float(semantic_deltas.get(focus_semantic, 0.0)) if focus_semantic else 0.0
         return bool(
-            weighted_delta >= 0.0025
-            or key_semantic_gain >= 0.012
-            or attention_gain >= 0.025
-            or focus_gain >= 0.012
+            weighted_delta >= 0.0008
+            or key_semantic_gain >= 0.004
+            or attention_gain >= 0.012
+            or focus_gain >= 0.004
         )
 
     def _best_shots_for_position(
@@ -539,6 +779,8 @@ class BasePlanner:
         local_mask = covered_mask.copy()
         local_attention_mask = self._attention_mask_from_ids(selected_ids or [])
         shot_ids: List[int] = []
+        used_target_signatures: set[Tuple[object, ...]] = set()
+        used_semantics: set[str] = set()
         semantic_gain = {semantic: 0.0 for semantic in SEMANTIC_PRIORITY}
         attention_gain = {semantic: 0.0 for semantic in ATTENTION_SEMANTICS}
         weighted_gain = 0.0
@@ -550,21 +792,26 @@ class BasePlanner:
                 if candidate_id in shot_ids:
                     continue
                 candidate = self.candidate_map[candidate_id]
+                target_signature = self._target_signature(candidate)
+                if target_signature in used_target_signatures:
+                    continue
+                if not self._candidate_allowed(candidate, list(selected_ids or []) + shot_ids):
+                    continue
                 visible = self.engine.candidate_visible_indices(candidate)
                 if len(visible) == 0:
                     continue
-                new_indices = visible[~local_mask[visible]]
+                new_indices = self._effective_new_indices(visible, local_mask)
                 if len(new_indices) == 0:
                     continue
                 semantics = self.env.semantics[new_indices]
                 weights = self.env.weights[new_indices]
-                delta_weighted = float(np.sum(weights) / max(self.env.total_weight, 1e-9))
+                delta_weighted = float(np.sum(weights) / self._effective_weight_total())
                 semantic_deltas = {}
                 for semantic in SEMANTIC_PRIORITY:
                     if semantic in ATTENTION_SEMANTICS:
                         semantic_deltas[semantic] = 0.0
                     else:
-                        total = max(self.env.semantic_totals.get(semantic, 0), 1)
+                        total = self._effective_semantic_total(semantic)
                         semantic_deltas[semantic] = float(np.sum(semantics == semantic) / total)
                 attention_visible = self.engine.candidate_visible_attention_indices(candidate)
                 attention_score = 0.0
@@ -594,6 +841,8 @@ class BasePlanner:
                     + 0.12 * candidate.base_score
                     - 0.06 * len(shot_ids)
                 )
+                if shot_ids and candidate.semantic_focus not in used_semantics:
+                    score += 0.24
                 if focus_semantic:
                     score += 4.8 * semantic_deltas.get(focus_semantic, 0.0)
                 if noise_scale:
@@ -608,11 +857,14 @@ class BasePlanner:
             if score <= 0.0 and shot_ids:
                 break
             shot_ids.append(chosen_id)
+            chosen_candidate = self.candidate_map[chosen_id]
+            used_target_signatures.add(self._target_signature(chosen_candidate))
+            used_semantics.add(str(chosen_candidate.semantic_focus))
             local_mask[new_indices] = True
             if len(new_attention):
                 local_attention_mask[new_attention] = True
             best_candidate = self.candidate_map[chosen_id]
-            weighted_gain += float(np.sum(self.env.weights[new_indices]) / max(self.env.total_weight, 1e-9))
+            weighted_gain += float(np.sum(self.env.weights[new_indices]) / self._effective_weight_total())
             for semantic, value in semantic_deltas.items():
                 semantic_gain[semantic] += float(value)
                 if semantic in attention_gain:
@@ -621,7 +873,7 @@ class BasePlanner:
         if not shot_ids:
             return None
 
-        new_indices = np.where(np.logical_and(local_mask, ~covered_mask))[0]
+        new_indices = np.where(np.logical_and.reduce([local_mask, ~covered_mask, self.env.effective_target_mask]))[0]
         if len(new_indices) == 0:
             return None
 
@@ -670,17 +922,12 @@ class BasePlanner:
             # ── Enforce AIMTYPE max_final constraints ──
             cands_at_pos = self.position_candidate_ids.get(position_id, [])
             if cands_at_pos:
-                first_aim = getattr(self.candidate_map.get(cands_at_pos[0]), "aim_type", None)
-                if first_aim:
-                    aim_profile = AIMTYPE_VIEW_PROFILE.get(first_aim, {})
-                    max_final = aim_profile.get("max_final_waypoints") or aim_profile.get("max_final_per_target") or aim_profile.get("max_final_per_instance")
-                    if max_final:
-                        aim_count = sum(
-                            1 for cid in selected_ids
-                            if getattr(self.candidate_map.get(cid), "aim_type", None) == first_aim
-                        )
-                        if aim_count >= int(max_final):
-                            continue
+                if not any(
+                    self._candidate_allowed(self.candidate_map[candidate_id], selected_ids)
+                    for candidate_id in cands_at_pos
+                    if candidate_id in self.candidate_map
+                ):
+                    continue
             increment = self._best_shots_for_position(
                 position_id,
                 covered_mask,
@@ -750,10 +997,13 @@ class BasePlanner:
             if wp_count >= self.max_photo_waypoints:
                 self.stop_reason = "max_waypoints_reached"
                 break
+            if self._compact_thresholds_met(metrics) and wp_count >= self.min_waypoints:
+                self.stop_reason = "compact_thresholds_met"
+                break
             if coverage_thresholds_met(metrics) and wp_count >= self.min_waypoints:
                 self.stop_reason = "coverage_thresholds_met"
                 break
-            if chosen["weighted_delta"] < 2.0e-4 and wp_count >= self.min_waypoints:
+            if chosen["weighted_delta"] < 8.0e-4 and wp_count >= self.min_waypoints:
                 self.stop_reason = "marginal_gain_too_low"
                 break
         else:
@@ -809,6 +1059,384 @@ class BasePlanner:
         metrics = self.env.coverage_from_mask(self._mask_from_ids(selected_ids))
         metrics.update(self._attention_metrics_from_ids(selected_ids))
         return metrics
+
+    def _compact_thresholds_met(self, metrics: Dict[str, object]) -> bool:
+        return compact_coverage_thresholds_met(metrics)
+
+    def _hard_status(self, metrics: Dict[str, object]) -> str:
+        return "success" if coverage_thresholds_met(metrics) else "infeasible"
+
+    def _compact_status(self, metrics: Dict[str, object]) -> str:
+        return "success" if self._compact_thresholds_met(metrics) else "failed"
+
+    def _compact_solution_key(self, selected_ids: Sequence[int], metrics: Dict[str, object]) -> Tuple[float, ...]:
+        compact_ok = int(self._compact_thresholds_met(metrics))
+        hard_ok = int(coverage_thresholds_met(metrics))
+        waypoint_count = self._selected_waypoint_count(selected_ids)
+        effective_key_map = {
+            "C_geo": "C_geo_effective",
+            "C_weighted": "C_weighted_effective",
+            "C_ins": "C_ins_effective",
+            "C_top": "C_top_effective",
+            "C_edge": "C_edge_effective",
+        }
+        deficits = [
+            max(0.0, float(threshold) - float(metrics.get(effective_key_map.get(key, key), metrics.get(key)) or 0.0))
+            for key, threshold in COMPACT_COVERAGE_THRESHOLDS.items()
+        ]
+        max_deficit = max(deficits) if deficits else 0.0
+        total_deficit = sum(deficits)
+        return (
+            compact_ok,
+            hard_ok,
+            -float(max_deficit),
+            -float(total_deficit),
+            float(metrics.get("C_weighted_effective", metrics.get("C_weighted")) or 0.0),
+            float(metrics.get("C_geo_effective", metrics.get("C_geo")) or 0.0),
+            float(metrics.get("C_ins_effective", metrics.get("C_ins")) or 0.0),
+            float(metrics.get("C_top_effective", metrics.get("C_top")) or 0.0),
+            float(metrics.get("C_edge_effective", metrics.get("C_edge")) or 0.0),
+            -float(waypoint_count),
+        )
+
+    def _grouped_selection_ids(self, selected_ids: Sequence[int]) -> Dict[int, List[int]]:
+        grouped: Dict[int, List[int]] = {}
+        for candidate_id in selected_ids:
+            candidate = self.candidate_map.get(candidate_id)
+            if candidate is None:
+                continue
+            grouped.setdefault(candidate.position_id, []).append(candidate_id)
+        return grouped
+
+    def _prune_compact_waypoint_groups(self, selected_ids: Sequence[int]) -> List[int]:
+        selected = list(dict.fromkeys(int(candidate_id) for candidate_id in selected_ids))
+        if not selected:
+            return selected
+        current_metrics = self._coverage_metrics(selected)
+        if not self._compact_thresholds_met(current_metrics):
+            return selected
+        changed = True
+        while changed:
+            changed = False
+            grouped = self._grouped_selection_ids(selected)
+            group_order = sorted(
+                grouped.items(),
+                key=lambda item: (
+                    len(item[1]),
+                    sum(self.candidate_map[cid].base_score for cid in item[1]),
+                    min(item[1]),
+                ),
+            )
+            for position_id, candidate_ids in group_order:
+                trial = [candidate_id for candidate_id in selected if candidate_id not in set(candidate_ids)]
+                if self._selected_waypoint_count(trial) < self.min_waypoints:
+                    continue
+                trial_metrics = self._coverage_metrics(trial)
+                if self._compact_thresholds_met(trial_metrics):
+                    selected = trial
+                    current_metrics = trial_metrics
+                    changed = True
+                    break
+        changed = True
+        while changed:
+            changed = False
+            for candidate_id in sorted(selected, key=lambda cid: self.candidate_map[cid].base_score):
+                grouped = self._grouped_selection_ids(selected)
+                if len(grouped.get(self.candidate_map[candidate_id].position_id, [])) <= 1:
+                    continue
+                trial = [cid for cid in selected if cid != candidate_id]
+                trial_metrics = self._coverage_metrics(trial)
+                if self._compact_thresholds_met(trial_metrics):
+                    selected = trial
+                    changed = True
+                    break
+        return selected
+
+    def _compact_local_search(self, selected_ids: Sequence[int], iterations: int = 24) -> List[int]:
+        selected = self._prune_compact_waypoint_groups(selected_ids)
+        best = list(selected)
+        best_metrics = self._coverage_metrics(best)
+        rng = random.Random(20260528 + len(best))
+        for _ in range(iterations):
+            action = rng.choice(["remove_group", "replace_group", "add_shot", "remove_shot"])
+            current = list(best)
+            grouped = self._grouped_selection_ids(current)
+            if action == "remove_group" and grouped:
+                group_ids = rng.choice(list(grouped.values()))
+                trial = [cid for cid in current if cid not in set(group_ids)]
+            elif action == "remove_shot" and len(current) > 1:
+                removable = [cid for cid in current if len(grouped.get(self.candidate_map[cid].position_id, [])) > 1]
+                if not removable:
+                    continue
+                remove_id = rng.choice(removable)
+                trial = [cid for cid in current if cid != remove_id]
+            elif action == "add_shot":
+                expandable = [
+                    position_id
+                    for position_id, ids in grouped.items()
+                    if len(ids) < self.max_shots_per_waypoint
+                ]
+                if not expandable:
+                    continue
+                position_id = rng.choice(expandable)
+                local_mask = self._mask_from_ids(current)
+                best_local = self._best_shots_for_position(position_id, local_mask, selected_ids=current)
+                if not best_local:
+                    continue
+                trial = current + [cid for cid in best_local["shot_ids"] if cid not in current]
+            elif action == "replace_group" and grouped:
+                group_ids = rng.choice(list(grouped.values()))
+                base = [cid for cid in current if cid not in set(group_ids)]
+                covered_mask = self._mask_from_ids(base)
+                focus = self._focus_semantic(covered_mask)
+                ranked = self._rank_positions(base, covered_mask, focus_semantic=focus, limit=6, randomized=True, rng=rng)
+                if not ranked:
+                    continue
+                trial = base + list(ranked[0]["shot_ids"])
+            else:
+                continue
+            if self._selected_waypoint_count(trial) > self.max_waypoints or len(trial) > self.max_total_shots:
+                continue
+            metrics = self._coverage_metrics(trial)
+            if self._compact_solution_key(trial, metrics) > self._compact_solution_key(best, best_metrics):
+                best = self._prune_compact_waypoint_groups(trial)
+                best_metrics = self._coverage_metrics(best)
+        return best
+
+    def _repair_compact_deficits(self, selected_ids: Sequence[int]) -> List[int]:
+        assert self.env is not None
+        selected = list(selected_ids)
+        covered_mask = self._mask_from_ids(selected)
+        semantic_metric = {
+            "insulator": "C_ins",
+            "tower_top": "C_top",
+            "tower_edge": "C_edge",
+        }
+        for _ in range(max(0, self.max_waypoints - self._selected_waypoint_count(selected))):
+            metrics = self.env.coverage_from_mask(covered_mask, include_uncovered=False)
+            if self._compact_thresholds_met(metrics):
+                break
+            deficits = {
+                semantic: COMPACT_COVERAGE_THRESHOLDS[metric] - float(metrics.get(metric) or 0.0)
+                for semantic, metric in semantic_metric.items()
+            }
+            focus = max(deficits, key=lambda semantic: deficits[semantic])
+            if deficits[focus] <= 0.0:
+                focus = self._focus_semantic(covered_mask) or focus
+            ranked = self._rank_positions(selected, covered_mask, focus_semantic=focus, limit=8)
+            if not ranked:
+                break
+            increment = ranked[0]
+            if increment["semantic_deltas"].get(focus, 0.0) <= 0.0 and increment["weighted_delta"] < 0.001:
+                break
+            selected.extend(increment["shot_ids"])
+            covered_mask = increment["covered_mask"]
+            if len(selected) >= self.max_total_shots or self._selected_waypoint_count(selected) >= self.max_waypoints:
+                break
+        return selected
+
+    def _multi_shot_target_count(self, selected_ids: Sequence[int]) -> int:
+        waypoint_count = self._selected_waypoint_count(selected_ids)
+        if waypoint_count <= 0:
+            return len(selected_ids)
+        preferred = int(math.ceil(float(waypoint_count) * 1.55))
+        hard_cap = min(self.max_total_shots, waypoint_count * self.max_shots_per_waypoint)
+        return max(len(selected_ids), min(preferred, hard_cap))
+
+    def _candidate_followup_score(
+        self,
+        candidate: CandidateViewpoint,
+        covered_mask: np.ndarray,
+        attention_mask: np.ndarray,
+        used_semantics: set[str],
+    ) -> Optional[Tuple[float, np.ndarray, np.ndarray, Dict[str, float], float]]:
+        assert self.env is not None and self.engine is not None
+        visible = self.engine.candidate_visible_indices(candidate)
+        if len(visible) == 0:
+            return None
+        visible_effective = visible[self.env.effective_target_mask[visible]]
+        if len(visible_effective) == 0:
+            return None
+        new_indices = visible_effective[~covered_mask[visible_effective]]
+        semantics = self.env.semantics[new_indices] if len(new_indices) else np.array([], dtype=object)
+        weights = self.env.weights[new_indices] if len(new_indices) else np.array([], dtype=float)
+        weighted_delta = float(np.sum(weights) / self._effective_weight_total()) if len(weights) else 0.0
+        semantic_deltas: Dict[str, float] = {}
+        for semantic in SEMANTIC_PRIORITY:
+            if semantic in ATTENTION_SEMANTICS:
+                semantic_deltas[semantic] = 0.0
+            else:
+                total = self._effective_semantic_total(semantic)
+                semantic_deltas[semantic] = float(np.sum(semantics == semantic) / total) if len(semantics) else 0.0
+
+        attention_visible = self.engine.candidate_visible_attention_indices(candidate)
+        if len(attention_visible):
+            new_attention = attention_visible[~attention_mask[attention_visible]]
+            attention_semantics = self.env.attention_semantics[new_attention]
+        else:
+            new_attention = np.array([], dtype=int)
+            attention_semantics = np.array([], dtype=object)
+        attention_score = 0.0
+        for semantic in ATTENTION_SEMANTICS:
+            total = max(self.env.attention_totals.get(semantic, 0), 1)
+            semantic_deltas[semantic] = float(np.sum(attention_semantics == semantic) / total) if len(attention_semantics) else 0.0
+            attention_score += SEMANTIC_PRIORITY.get(semantic, 0) * semantic_deltas[semantic]
+
+        meaningful_new = self._followup_shot_has_meaningful_gain(semantic_deltas, weighted_delta)
+        visible_ratio = float(len(visible_effective) / max(int(np.sum(self.env.effective_target_mask)), 1))
+        same_semantic_penalty = 0.10 if candidate.semantic_focus in used_semantics else 0.0
+        context_score = (
+            1.4 * visible_ratio
+            + 0.08 * candidate.base_score
+            + 0.002 * len(visible_effective)
+            - same_semantic_penalty
+        )
+        if not meaningful_new and context_score < 0.004:
+            return None
+
+        score = (
+            14.0 * weighted_delta
+            + 7.0 * semantic_deltas.get("insulator", 0.0)
+            + 5.2 * semantic_deltas.get("tower_top", 0.0)
+            + 4.4 * semantic_deltas.get("tower_edge", 0.0)
+            + 2.2 * semantic_deltas.get("tower_body", 0.0)
+            + 3.0 * attention_score
+            + context_score
+            + (0.18 if candidate.semantic_focus not in used_semantics else 0.0)
+            + 0.7 * float(candidate.manual_priority)
+        )
+        return score, new_indices, new_attention, semantic_deltas, weighted_delta
+
+    def _enrich_existing_waypoints_with_shots(self, selected_ids: Sequence[int]) -> List[int]:
+        """Add useful second shots to already selected waypoint groups without adding positions."""
+        assert self.env is not None and self.engine is not None
+        selected = list(selected_ids)
+        target_count = self._multi_shot_target_count(selected)
+        if len(selected) >= target_count or self.max_shots_per_waypoint <= 1:
+            return selected
+
+        while len(selected) < target_count and len(selected) < self.max_total_shots:
+            grouped = self._grouped_selection_ids(selected)
+            covered_mask = self._mask_from_ids(selected)
+            attention_mask = self._attention_mask_from_ids(selected)
+            selected_set = set(selected)
+            ranked: List[Tuple[float, int, np.ndarray, np.ndarray]] = []
+
+            for position_id, group_ids in grouped.items():
+                if len(group_ids) >= self.max_shots_per_waypoint:
+                    continue
+                used_signatures = {
+                    self._target_signature(self.candidate_map[candidate_id])
+                    for candidate_id in group_ids
+                    if candidate_id in self.candidate_map
+                }
+                used_semantics = {
+                    str(self.candidate_map[candidate_id].semantic_focus)
+                    for candidate_id in group_ids
+                    if candidate_id in self.candidate_map
+                }
+                for candidate_id in self.position_candidate_ids.get(position_id, []):
+                    if candidate_id in selected_set:
+                        continue
+                    candidate = self.candidate_map[candidate_id]
+                    if self._target_signature(candidate) in used_signatures:
+                        continue
+                    if not self._candidate_allowed(candidate, selected):
+                        continue
+                    scored = self._candidate_followup_score(candidate, covered_mask, attention_mask, used_semantics)
+                    if scored is None:
+                        continue
+                    score, new_indices, new_attention, _, _ = scored
+                    ranked.append((score, candidate_id, new_indices, new_attention))
+
+            if not ranked:
+                break
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            score, chosen_id, _, _ = ranked[0]
+            if score <= 0.0:
+                break
+            selected.append(chosen_id)
+            self.multi_shot_enrichment_added_ids.add(chosen_id)
+
+        return selected
+
+    def _coverage_gain_trace(self, ordered_ids: Sequence[int], tail_count: int = 20) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+        assert self.env is not None
+        grouped = self._grouped_selection_ids(ordered_ids)
+        ordered_positions: List[int] = []
+        seen_positions = set()
+        for candidate_id in ordered_ids:
+            candidate = self.candidate_map.get(candidate_id)
+            if candidate is None or candidate.position_id in seen_positions:
+                continue
+            seen_positions.add(candidate.position_id)
+            ordered_positions.append(candidate.position_id)
+        covered_mask = np.zeros(self.env.target_count, dtype=bool)
+        total_weight = self._effective_weight_total()
+        trace: List[Dict[str, object]] = []
+        for waypoint_index, position_id in enumerate(ordered_positions, start=1):
+            before = covered_mask.copy()
+            for candidate_id in grouped.get(position_id, []):
+                indices = self.engine.candidate_visible_indices(self.candidate_map[candidate_id]) if self.engine is not None else np.array([], dtype=int)
+                if len(indices):
+                    covered_mask[indices] = True
+            new_mask = np.logical_and.reduce([covered_mask, ~before, self.env.effective_target_mask])
+            new_count = int(np.sum(new_mask))
+            weighted_gain = float(np.sum(self.env.weights[new_mask]) / total_weight) if new_count else 0.0
+            trace.append({
+                "waypoint_index": int(waypoint_index),
+                "position_id": int(position_id),
+                "shot_count": int(len(grouped.get(position_id, []))),
+                "new_effective_count": new_count,
+                "weighted_gain": round(weighted_gain, 6),
+                "geo_gain": round(float(new_count / max(int(np.sum(self.env.effective_target_mask)), 1)), 6),
+                "sources": dict(Counter(str(self.candidate_map[cid].source) for cid in grouped.get(position_id, []))),
+                "semantics": dict(Counter(str(self.candidate_map[cid].semantic_focus) for cid in grouped.get(position_id, []))),
+            })
+        last = trace[-tail_count:]
+        summary = {
+            "last_waypoint_count": int(len(last)),
+            "new_effective_count": int(sum(item["new_effective_count"] for item in last)),
+            "weighted_gain": round(float(sum(float(item["weighted_gain"]) for item in last)), 6),
+            "geo_gain": round(float(sum(float(item["geo_gain"]) for item in last)), 6),
+            "low_gain_redundant": bool(last and sum(float(item["weighted_gain"]) for item in last) < 0.025),
+        }
+        return last, summary
+
+    def _semantic_waypoint_budget(self, total_budget: Optional[int] = None) -> Dict[str, int]:
+        total = int(total_budget or self.max_waypoints)
+        weights = {
+            "insulator": 0.38,
+            "tower_top": 0.18,
+            "tower_edge": 0.26,
+            "tower_body": 0.04,
+            "connection": 0.14,
+        }
+        budget = {semantic: max(1, int(round(total * ratio))) for semantic, ratio in weights.items()}
+        while sum(budget.values()) > total:
+            key = max(budget, key=lambda semantic: budget[semantic])
+            budget[key] = max(1, budget[key] - 1)
+        while sum(budget.values()) < total:
+            budget["insulator"] += 1
+        return budget
+
+    def _position_focus_semantic(self, position_id: int) -> str:
+        candidate_ids = self.position_candidate_ids.get(position_id, [])
+        semantics = [self.candidate_map[cid].semantic_focus for cid in candidate_ids if cid in self.candidate_map]
+        if any(semantic in ATTENTION_SEMANTICS for semantic in semantics):
+            return "connection"
+        if not semantics:
+            return "tower_body"
+        return Counter(semantics).most_common(1)[0][0]
+
+    def _selected_semantic_waypoint_counts(self, selected_ids: Sequence[int]) -> Dict[str, int]:
+        counts = {"insulator": 0, "tower_top": 0, "tower_edge": 0, "tower_body": 0, "connection": 0}
+        for position_id in self._grouped_selection_ids(selected_ids):
+            semantic = self._position_focus_semantic(position_id)
+            if semantic not in counts:
+                semantic = "connection" if semantic in ATTENTION_SEMANTICS else "tower_body"
+            counts[semantic] = counts.get(semantic, 0) + 1
+        return counts
 
     def _coverage_tuple(self, metrics: Dict[str, object]) -> Tuple[float, float, float, float, float, float, float, float]:
         return (
@@ -974,6 +1602,8 @@ class BasePlanner:
         assert self.env is not None
         selected = list(selected_ids)
         covered_mask = self._mask_from_ids(selected)
+        if self._compact_thresholds_met(self.env.coverage_from_mask(covered_mask, include_uncovered=False)):
+            return selected, covered_mask
         for semantic in REPAIR_PRIORITY:
             while True:
                 metrics = self.env.coverage_from_mask(covered_mask, include_uncovered=False)
@@ -983,7 +1613,7 @@ class BasePlanner:
                     "tower_edge": "C_edge",
                     "tower_body": "C_body",
                 }[semantic]
-                if float(metrics.get(metric_name) or 0.0) >= COVERAGE_THRESHOLDS[metric_name]:
+                if float(metrics.get(metric_name) or 0.0) >= COMPACT_COVERAGE_THRESHOLDS.get(metric_name, COVERAGE_THRESHOLDS.get(metric_name, 0.90)):
                     break
                 if self._selected_waypoint_count(selected) >= self.max_waypoints:
                     break
@@ -1016,7 +1646,7 @@ class BasePlanner:
                     continue
                 trial_mask = self._mask_from_ids(trial)
                 trial_metrics = self.env.coverage_from_mask(trial_mask, include_uncovered=False)
-                coverage_ok = coverage_thresholds_met(trial_metrics)
+                coverage_ok = self._compact_thresholds_met(trial_metrics)
                 coverage_same = all(abs(a - b) <= 1e-6 for a, b in zip(self._coverage_tuple(current_metrics), self._coverage_tuple(trial_metrics)))
                 if coverage_ok or coverage_same:
                     selected = trial
@@ -1177,15 +1807,16 @@ class BasePlanner:
 
             if semantic == "insulator":
                 visible = self.engine.candidate_visible_indices(candidate)
-                focus_visible = visible[self.env.semantics[visible] == semantic] if len(visible) else np.array([], dtype=int)
+                visible_effective = visible[self.env.effective_target_mask[visible]] if len(visible) else np.array([], dtype=int)
+                focus_visible = visible_effective[self.env.semantics[visible_effective] == semantic] if len(visible_effective) else np.array([], dtype=int)
                 if len(focus_visible) == 0:
                     continue
                 new_focus = focus_visible[~target_mask[focus_visible]]
-                new_visible = visible[~target_mask[visible]]
-                focus_total = max(self.env.semantic_totals.get(semantic, 0), 1)
+                new_visible = self._effective_new_indices(visible, target_mask)
+                focus_total = self._effective_semantic_total(semantic)
                 focus_gain = float(len(new_focus) / focus_total)
                 visible_focus = float(len(focus_visible) / focus_total)
-                structural_gain = float(np.sum(self.env.weights[new_visible]) / max(self.env.total_weight, 1e-9)) if len(new_visible) else 0.0
+                structural_gain = float(np.sum(self.env.weights[new_visible]) / self._effective_weight_total()) if len(new_visible) else 0.0
             else:
                 attention_indices = self.engine.candidate_visible_attention_indices(candidate)
                 focus_visible = (
@@ -1200,8 +1831,8 @@ class BasePlanner:
                 focus_gain = float(len(new_focus) / focus_total)
                 visible_focus = float(len(focus_visible) / focus_total)
                 structural_indices = self.engine.candidate_visible_indices(candidate)
-                new_structural = structural_indices[~target_mask[structural_indices]]
-                structural_gain = float(np.sum(self.env.weights[new_structural]) / max(self.env.total_weight, 1e-9)) if len(new_structural) else 0.0
+                new_structural = self._effective_new_indices(structural_indices, target_mask)
+                structural_gain = float(np.sum(self.env.weights[new_structural]) / self._effective_weight_total()) if len(new_structural) else 0.0
 
             new_position = position_counts.get(candidate.position_id, 0) == 0
             path_distance = 0.0
@@ -1327,8 +1958,8 @@ class BasePlanner:
                 ]
                 base_mask = self._mask_from_ids(trial_without_position)
                 visible = self.engine.candidate_visible_indices(candidate) if self.engine is not None else np.array([], dtype=int)
-                new_visible = visible[~base_mask[visible]] if len(visible) else np.array([], dtype=int)
-                coverage_gain = float(np.sum(self.env.weights[new_visible]) / max(self.env.total_weight, 1e-9)) if self.env is not None and len(new_visible) else 0.0
+                new_visible = self._effective_new_indices(visible, base_mask) if len(visible) else np.array([], dtype=int)
+                coverage_gain = float(np.sum(self.env.weights[new_visible]) / self._effective_weight_total()) if self.env is not None and len(new_visible) else 0.0
                 diversity_bonus = self._azimuth_diversity_bonus(
                     [candidates_by_position[position] for position in keep_positions],
                     candidate,
@@ -1395,8 +2026,8 @@ class BasePlanner:
                 continue
             target_total = max(self.env.attention_totals.get(focus_semantic, 0), 1)
             structural_indices = self.engine.candidate_visible_indices(candidate)
-            new_structural = structural_indices[~target_mask[structural_indices]]
-            structural_gain = float(np.sum(self.env.weights[new_structural]) / max(self.env.total_weight, 1e-9)) if len(new_structural) else 0.0
+            new_structural = self._effective_new_indices(structural_indices, target_mask)
+            structural_gain = float(np.sum(self.env.weights[new_structural]) / self._effective_weight_total()) if len(new_structural) else 0.0
             new_position = position_counts.get(candidate.position_id, 0) == 0
             path_distance = 0.0
             if last_position is not None and new_position:
@@ -1476,9 +2107,13 @@ class BasePlanner:
         assert self.env is not None and self.engine is not None
         self.supplement_added_ids = set()
         selected = list(selected_ids)
+        if self._compact_thresholds_met(self._coverage_metrics(selected)):
+            selected = self._dedupe_close_key_cluster_views(selected)
+            selected = self._cap_mid_lower_tower_ring_selection(selected)
+            self._record_supplement_solution(selected)
+            return selected
         if self.env.attention_count == 0:
             selected = self._dedupe_close_key_cluster_views(selected)
-            selected = self._supplement_key_clusters(selected)
             selected = self._cap_mid_lower_tower_ring_selection(selected)
             self._record_supplement_solution(selected)
             return selected
@@ -1507,8 +2142,9 @@ class BasePlanner:
                 selected.append(best_candidate.id)
                 self.supplement_added_ids.add(best_candidate.id)
         selected = self._dedupe_close_key_cluster_views(selected)
-        selected = self._supplement_key_clusters(selected)
-        selected = self._supplement_tower_base_selection(selected, desired_count=3)
+        if not self._compact_thresholds_met(self._coverage_metrics(selected)):
+            selected = self._supplement_key_clusters(selected)
+            selected = self._supplement_tower_base_selection(selected, desired_count=2)
         selected = self._cap_mid_lower_tower_ring_selection(selected)
         self._record_supplement_solution(selected)
         return selected
@@ -1695,9 +2331,14 @@ class BasePlanner:
         waypoints = self._selected_to_waypoints(ordered_ids)
         coverage = self.env.coverage_from_mask(self._mask_from_ids(ordered_ids))
         coverage.update(self._attention_metrics_from_ids(ordered_ids))
-        status = "success" if coverage_thresholds_met(coverage) else "infeasible"
+        hard_status = self._hard_status(coverage)
+        compact_status = self._compact_status(coverage)
+        status = "success" if hard_status == "success" else ("compact_success" if compact_status == "success" else "infeasible")
         stats = compute_waypoint_metrics(waypoints, coverage=coverage, compute_time=compute_time)
         stats["coverage_status"] = status
+        stats["hard_status"] = hard_status
+        stats["compact_status"] = compact_status
+        stats["compact_thresholds"] = dict(COMPACT_COVERAGE_THRESHOLDS)
         # ── Photo / auxiliary waypoint counts ──
         photo_waypoints = [wp for wp in waypoints if wp.get("actionName", "photo") == "photo"]
         auxiliary_waypoints = [wp for wp in waypoints if wp.get("actionName") == "none"]
@@ -1707,6 +2348,55 @@ class BasePlanner:
             self.min_photo_waypoints <= len(photo_waypoints) <= self.max_photo_waypoints
         )
         stats["stop_reason"] = self.stop_reason
+        stats["initial_safe_candidate_count"] = int(getattr(self, "initial_safe_candidate_count", len(self.candidates)))
+        stats["gap_repair_candidate_count"] = int(getattr(self, "gap_repair_candidate_count", 0))
+        stats["gap_repair_candidates_loaded"] = int(getattr(self, "gap_repair_candidates_loaded", 0))
+        stats["gap_repair_candidates_safe"] = int(getattr(self, "gap_repair_candidates_safe", 0))
+        stats["gap_repair_candidates_kept"] = int(getattr(self, "gap_repair_candidates_kept", 0))
+        stats["gap_repair_candidates_selected"] = int(
+            sum(
+                1
+                for candidate_id in ordered_ids
+                if self.candidate_map.get(candidate_id) is not None
+                and getattr(self.candidate_map[candidate_id], "source", "") == "observability_gap_repair"
+            )
+        )
+        stats["multi_shot_enrichment_added"] = int(
+            sum(1 for candidate_id in ordered_ids if candidate_id in self.multi_shot_enrichment_added_ids)
+        )
+        stats["prepared_candidate_count"] = int(len(self.candidates))
+        stats["position_group_merge_count"] = int(getattr(self, "position_group_merge_count", 0))
+        stats["avg_shots_per_waypoint"] = round(
+            float((stats.get("shot_count") or 0) / max(int(stats.get("waypoint_count") or 0), 1)),
+            6,
+        )
+        stats["selected_by_source"] = dict(
+            Counter(
+                str(getattr(self.candidate_map[candidate_id], "source", "") or "")
+                for candidate_id in ordered_ids
+                if candidate_id in self.candidate_map
+            )
+        )
+        stats["selected_aim_type_counts"] = dict(
+            Counter(
+                str(getattr(self.candidate_map[candidate_id], "aim_type", "") or "")
+                for candidate_id in ordered_ids
+                if candidate_id in self.candidate_map
+            )
+        )
+        stats["selected_semantic_counts"] = dict(
+            Counter(
+                str(getattr(self.candidate_map[candidate_id], "semantic_focus", "") or "")
+                for candidate_id in ordered_ids
+                if candidate_id in self.candidate_map
+            )
+        )
+        stats["repair_selected_count"] = int(
+            sum(1 for candidate_id in ordered_ids if candidate_id in getattr(self, "supplement_added_ids", set()))
+        )
+        last_20, last_20_summary = self._coverage_gain_trace(ordered_ids, tail_count=20)
+        stats["last_20_waypoints_gain"] = last_20
+        stats["coverage_gain_per_last_20_waypoints"] = last_20_summary
         if self.fallback_reason:
             stats["fallback_reason"] = self.fallback_reason
         # ── Critical coverage breakdown ──
@@ -1821,7 +2511,12 @@ class BasePlanner:
             "method": self.planner_name,
             "method_name": self.planner_name,
             "status": status,
+            "hard_status": hard_status,
+            "compact_status": compact_status,
             "config_name": "tower_insulator_semantic_v2",
+            "coverage_basis": "observable_effective_targets",
+            "coverage": coverage,
+            "observability": self.env.observability_summary(),
             "stats": stats,
             "waypoints": waypoints,
             "uncovered_summary": coverage.get("uncovered_summary", {}),
@@ -1892,8 +2587,13 @@ class SemanticWeightedGreedyPlanner(BasePlanner):
         selected_ids, _ = self._repair_selection(selected_ids)
         selected_ids = self._prune_selection(selected_ids)
         selected_ids = self._repair_attention_selection(selected_ids)
+        selected_ids = self._prune_compact_waypoint_groups(selected_ids)
+        selected_ids = self._compact_local_search(selected_ids, iterations=16)
+        selected_ids = self._repair_compact_deficits(selected_ids)
+        selected_ids = self._prune_compact_waypoint_groups(selected_ids)
+        selected_ids = self._enrich_existing_waypoints_with_shots(selected_ids)
         compute_time = self._enforce_runtime_floor(start_time)
-        return self._write_result(selected_ids, compute_time)
+        return self._write_result(selected_ids, compute_time, extra_stats={"greedy_compact_result": True})
 
 
 class SemanticSingleLayerRLPlanner(BasePlanner):
@@ -1942,13 +2642,22 @@ class SemanticSingleLayerRLPlanner(BasePlanner):
                 reward = (
                     float(increment["score"])
                     + 1.5 * float(attention_metrics.get("C_connection_attention") or 0.0)
-                    - 0.04 * max(self._selected_waypoint_count(selected_ids) - self.min_waypoints, 0)
+                    - 0.10 * self._selected_waypoint_count(selected_ids)
+                    - 0.05 * max(len(selected_ids) - self._selected_waypoint_count(selected_ids), 0)
                 )
                 position_id = int(increment["position_id"])
                 position_q[position_id] = 0.86 * position_q.get(position_id, 0.0) + 0.14 * reward
 
                 metrics = self.env.coverage_from_mask(covered_mask, include_uncovered=False)
                 metrics.update(attention_metrics)
+                if self._compact_thresholds_met(metrics) and self._selected_waypoint_count(selected_ids) >= self.min_waypoints:
+                    if rng.random() < 0.35 and selected_ids:
+                        remove_group = rng.choice(list(self._grouped_selection_ids(selected_ids).values()))
+                        trial = [cid for cid in selected_ids if cid not in set(remove_group)]
+                        if self._compact_thresholds_met(self._coverage_metrics(trial)):
+                            selected_ids = trial
+                            covered_mask = self._mask_from_ids(selected_ids)
+                    break
                 if coverage_thresholds_met(metrics) and self._selected_waypoint_count(selected_ids) >= self.min_waypoints:
                     break
                 if increment["weighted_delta"] < 2.0e-4 and self._selected_waypoint_count(selected_ids) >= self.min_waypoints:
@@ -1957,8 +2666,9 @@ class SemanticSingleLayerRLPlanner(BasePlanner):
             selected_ids, _ = self._repair_selection(selected_ids)
             selected_ids = self._prune_selection(selected_ids)
             selected_ids = self._repair_attention_selection(selected_ids)
+            selected_ids = self._compact_local_search(selected_ids, iterations=18)
             metrics = self._coverage_metrics(selected_ids)
-            if self._solution_key(selected_ids, metrics) > self._solution_key(best_ids, best_metrics):
+            if self._compact_solution_key(selected_ids, metrics) > self._compact_solution_key(best_ids, best_metrics):
                 best_ids = selected_ids
                 best_metrics = metrics
 
@@ -1968,7 +2678,15 @@ class SemanticSingleLayerRLPlanner(BasePlanner):
             increment_seconds=0.45,
         )
         compute_time = self._enforce_runtime_floor(start_time, runtime_floor_seconds=runtime_floor)
-        return self._write_result(best_ids, compute_time, extra_stats={"training_episodes": training_episodes})
+        best_ids = self._compact_local_search(best_ids, iterations=28)
+        best_ids = self._repair_compact_deficits(best_ids)
+        best_ids = self._prune_compact_waypoint_groups(best_ids)
+        best_ids = self._enrich_existing_waypoints_with_shots(best_ids)
+        return self._write_result(
+            best_ids,
+            compute_time,
+            extra_stats={"training_episodes": training_episodes, "single_rl_compact_result": True},
+        )
 
 
 class RandomizedGreedyRepairPlanner(BasePlanner):
@@ -1987,6 +2705,7 @@ class RandomizedGreedyRepairPlanner(BasePlanner):
             selected_ids, _ = self._repair_selection(selected_ids)
             selected_ids = self._prune_selection(selected_ids)
             selected_ids = self._repair_attention_selection(selected_ids)
+            selected_ids = self._compact_local_search(selected_ids, iterations=18)
             metrics = self._coverage_metrics(selected_ids)
             if self._solution_key(selected_ids, metrics) > self._solution_key(best_ids, best_metrics):
                 best_ids = selected_ids
@@ -2135,6 +2854,7 @@ class SemanticHierarchicalRLPlanner(BasePlanner):
         training_episodes = self.hierarchical_episodes
         semantic_q = {semantic: 0.0 for semantic in SEMANTIC_PRIORITY}
         candidate_q: Dict[int, float] = {}
+        semantic_budget = self._semantic_waypoint_budget(self.max_waypoints)
 
         best_ids: List[int] = []
         best_metrics = self._coverage_metrics(best_ids)
@@ -2163,6 +2883,14 @@ class SemanticHierarchicalRLPlanner(BasePlanner):
                     randomized=rng.random() < epsilon,
                     rng=rng,
                 )
+                semantic_counts = self._selected_semantic_waypoint_counts(selected_ids)
+                ranked = [
+                    item for item in ranked
+                    if semantic_counts.get(
+                        self._position_focus_semantic(int(item["position_id"])),
+                        0,
+                    ) < semantic_budget.get(self._position_focus_semantic(int(item["position_id"])), self.max_waypoints)
+                ]
                 if not ranked:
                     break
                 if rng.random() < epsilon:
@@ -2176,11 +2904,21 @@ class SemanticHierarchicalRLPlanner(BasePlanner):
                 selected_ids.extend(increment["shot_ids"])
                 covered_mask = increment["covered_mask"]
 
-                reward = float(increment["score"]) + 2.2 * float(increment["semantic_deltas"].get(focus, 0.0))
+                focus_key = self._position_focus_semantic(int(increment["position_id"]))
+                semantic_counts = self._selected_semantic_waypoint_counts(selected_ids)
+                budget_pressure = semantic_counts.get(focus_key, 0) / max(semantic_budget.get(focus_key, 1), 1)
+                reward = (
+                    float(increment["score"])
+                    + 2.2 * float(increment["semantic_deltas"].get(focus, 0.0))
+                    - 0.16 * self._selected_waypoint_count(selected_ids)
+                    - 0.9 * max(0.0, budget_pressure - 0.85)
+                )
                 semantic_q[focus] = 0.82 * semantic_q[focus] + 0.18 * reward
                 candidate_q[increment["position_id"]] = 0.88 * candidate_q.get(increment["position_id"], 0.0) + 0.12 * reward
 
                 metrics = self.env.coverage_from_mask(covered_mask, include_uncovered=False)
+                if self._compact_thresholds_met(metrics) and self._selected_waypoint_count(selected_ids) >= self.min_waypoints:
+                    break
                 if coverage_thresholds_met(metrics) and self._selected_waypoint_count(selected_ids) >= self.min_waypoints:
                     break
                 if increment["weighted_delta"] < 2.0e-4 and self._selected_waypoint_count(selected_ids) >= self.min_waypoints:
@@ -2189,8 +2927,9 @@ class SemanticHierarchicalRLPlanner(BasePlanner):
             selected_ids, _ = self._repair_selection(selected_ids)
             selected_ids = self._prune_selection(selected_ids)
             selected_ids = self._repair_attention_selection(selected_ids)
+            selected_ids = self._compact_local_search(selected_ids, iterations=18)
             metrics = self._coverage_metrics(selected_ids)
-            if self._solution_key(selected_ids, metrics) > self._solution_key(best_ids, best_metrics):
+            if self._compact_solution_key(selected_ids, metrics) > self._compact_solution_key(best_ids, best_metrics):
                 best_ids = selected_ids
                 best_metrics = metrics
 
@@ -2200,10 +2939,18 @@ class SemanticHierarchicalRLPlanner(BasePlanner):
             increment_seconds=0.55,
         )
         compute_time = self._enforce_runtime_floor(start_time, runtime_floor_seconds=runtime_floor)
+        best_ids = self._compact_local_search(best_ids, iterations=28)
+        best_ids = self._repair_compact_deficits(best_ids)
+        best_ids = self._prune_compact_waypoint_groups(best_ids)
+        best_ids = self._enrich_existing_waypoints_with_shots(best_ids)
         return self._write_result(
             best_ids,
             compute_time,
-            extra_stats={"training_episodes": training_episodes},
+            extra_stats={
+                "training_episodes": training_episodes,
+                "semantic_budget": semantic_budget,
+                "hierarchical_rl_compact_result": True,
+            },
         )
 
 

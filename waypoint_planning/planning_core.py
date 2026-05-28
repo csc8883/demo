@@ -325,6 +325,13 @@ COVERAGE_THRESHOLDS = {
     "C_edge": 0.94,
     "C_body": 0.92,
 }
+COMPACT_COVERAGE_THRESHOLDS = {
+    "C_geo": 0.90,
+    "C_weighted": 0.90,
+    "C_ins": 0.90,
+    "C_top": 0.90,
+    "C_edge": 0.90,
+}
 DEFAULT_LIMITS = {
     "min_waypoints": 20,
     "max_waypoints": 80,
@@ -345,6 +352,17 @@ DEFAULT_LIMITS = {
 REPAIR_PRIORITY = ["insulator", "tower_top", "tower_edge"]
 CAMERA_SENSOR_WIDTH_MM = 36.0
 CAMERA_SENSOR_HEIGHT_MM = 24.0
+
+
+def required_no_fly_clearance_m(
+    safety_distance_m: float,
+    user_clearance_m: Optional[float] = None,
+) -> float:
+    """Return the single conductor no-fly clearance threshold used by all stages."""
+    safety = max(float(safety_distance_m), 0.0)
+    if user_clearance_m is not None:
+        return max(safety, float(user_clearance_m))
+    return max(safety, float(DEFAULT_LIMITS["conductor_no_fly_exterior_clearance_m"]))
 
 POWER_MODEL_CONFIG = {
     "power_model_version": "semantic_geometric_v1",
@@ -392,9 +410,8 @@ INSULATOR_INSTANCE_VIEW_CONFIG = {
         "outward_plus_z",
         "outward_minus_z",
     ],
-    "distances": [4.5, 6.0, 7.5],
+    "distances": [4.5, 6.0, 7.5, 9.0],
     "height_offsets": [0.0],
-    "focal_modes": ["F1", "F2"],
     "yaw_offsets_deg": [0.0],
     "max_candidates_per_instance": 30,
 }
@@ -416,6 +433,18 @@ INSULATOR_MAX_CANDIDATE_INSTANCES = 80
 
 MAX_ATTENTION_CANDIDATES = 5000
 MAX_CANDIDATES_TOTAL = 50000
+ENABLE_OBSERVABILITY_GAP_REPAIR = True
+MAX_GAP_REPAIR_CANDIDATES_TOTAL = 2000
+MAX_GAP_REPAIR_CANDIDATES_PER_TARGET = 3
+MAX_GAP_REPAIR_TARGETS_PER_SEMANTIC = 300
+GAP_REPAIR_SEMANTIC_PRIORITY = (
+    "conductor_insulator_connection",
+    "insulator",
+    "tower_top",
+    "tower_edge",
+    "tower_body",
+    "tower_lower30",
+)
 
 
 def build_supported_focals(max_eq_mm: float = 84.0) -> Dict[str, Dict[str, float]]:
@@ -562,23 +591,24 @@ def choose_focal_length_eq_mm(
     f_min, f_max = float(focal_range[0]), float(focal_range[1])
     d = max(float(distance), 1.0)
 
+    _aim_to_sem = {
+        "insulator_string": "insulator",
+        "conductor_insulator_connection": "conductor_insulator_connection",
+        "wire_insulator_connection": "conductor_insulator_connection",
+        "insulator_tower_side_connection": "insulator_tower_side_connection",
+        "ground_wire_tower_connection": "ground_wire_tower_connection",
+        "grounding_connection": "tower_base_connection",
+        "tower_overview": "tower_overview",
+        "tower_top": "tower_top",
+        "tower_body": "tower_body",
+        "tower_edge": "tower_edge",
+        "tower_base": "tower_base_connection",
+        "channel": "tower_body",
+    }
+
     # Determine required resolution for this aim type
     if required_resolution is None:
         # Map aim_type to semantic and look up required resolution
-        _aim_to_sem = {
-            "insulator_string": "insulator",
-            "conductor_insulator_connection": "conductor_insulator_connection",
-            "wire_insulator_connection": "conductor_insulator_connection",
-            "insulator_tower_side_connection": "insulator_tower_side_connection",
-            "ground_wire_tower_connection": "ground_wire_tower_connection",
-            "grounding_connection": "tower_base_connection",
-            "tower_overview": "tower_overview",
-            "tower_top": "tower_top",
-            "tower_body": "tower_body",
-            "tower_edge": "tower_edge",
-            "tower_base": "tower_base_connection",
-            "channel": "tower_body",
-        }
         sem = _aim_to_sem.get(aim_type, "tower_body")
         required_resolution = REQUIRED_RESOLUTION.get(sem, 0.7)
 
@@ -2774,10 +2804,7 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
     if not conductor_no_fly_volumes and not wire_curves:
         safety_warnings.append("no_conductor_no_fly_volumes_and_no_wire_curves: candidate safety fallback limited")
 
-    required_clearance_m = max(
-        float(DEFAULT_LIMITS["safety_distance_m"]),
-        float(DEFAULT_LIMITS["conductor_no_fly_exterior_clearance_m"]),
-    )
+    required_clearance_m = required_no_fly_clearance_m(DEFAULT_LIMITS["safety_distance_m"])
 
     patch_bins: Dict[Tuple[str, int, int, int, int], List[Dict[str, object]]] = {}
     for voxel in display_voxels:
@@ -3058,17 +3085,30 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         safety_rad = float(curve.get("safety_radius", DEFAULT_LIMITS["safety_distance_m"]))
         wire_curve_bboxes.append((bbox_min, bbox_max, safety_rad, ci))
 
-    no_fly_required_clearance_m = max(
-        float(DEFAULT_LIMITS["safety_distance_m"]),
-        float(DEFAULT_LIMITS["conductor_no_fly_exterior_clearance_m"]),
-    )
+    no_fly_required_clearance_m = required_no_fly_clearance_m(DEFAULT_LIMITS["safety_distance_m"])
     tower_safety_radius = float(POWER_MODEL_CONFIG["tower_safety_radius"])
     local_frame = surface_model.get("local_frame", {})
     line_dir = safe_normalize(np.asarray(local_frame.get("x_axis", [1.0, 0.0, 0.0]), dtype=float))
+    safety_points = np.asarray(surface_model.get("safety_points", []), dtype=float)
+    if safety_points.ndim != 2 or (safety_points.size and safety_points.shape[1] != 3):
+        safety_points = np.empty((0, 3), dtype=float)
+    candidate_safety_index = VoxelSafetyIndex(safety_points, max(DEFAULT_LIMITS["safety_distance_m"], 1.0))
 
     filter_stats = {"raw_candidate_count": 0, "inside_no_fly_rejected": 0, "clearance_rejected": 0,
                     "wire_curve_rejected": 0, "tower_safety_rejected": 0, "final_candidate_count": 0,
                     "fallback_relaxed_clearance_used": False}
+
+    def _no_fly_lateral_push_direction(volume: ConductorNoFlyVolume, cand_pos: np.ndarray) -> np.ndarray:
+        """Choose the nearest exterior lateral side, never the no-fly center line."""
+        _, v_value, z_value = volume.local_coordinates(cand_pos)
+        left_v, right_v = volume.side_bounds_at_z(z_value)
+        if v_value < left_v:
+            return -volume.v_axis
+        if v_value > right_v:
+            return volume.v_axis
+        if abs(v_value - left_v) <= abs(right_v - v_value):
+            return -volume.v_axis
+        return volume.v_axis
 
     def filter_candidate_by_safety(cand_pos: np.ndarray, allow_adjust: bool = False):
         """Returns (result, reject_reason) where result is None or (position, clearance, adjusted, steps, warning)
@@ -3079,40 +3119,43 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         min_clearance = float("inf")
 
         for volume in conductor_no_fly_volumes:
-            if volume.contains(cand_pos):
-                if not allow_adjust:
-                    return None, "inside_no_fly"
-                for attempt in range(6):
-                    steps += 1
-                    vol_center = volume.world_position(0.0, (volume.v_min + volume.v_max) / 2.0, float(cand_pos[2]))
-                    away_dir = safe_normalize(cand_pos - vol_center)
-                    cand_pos = cand_pos + away_dir * 0.5
-                    if not volume.contains(cand_pos):
-                        adjusted = True
-                        break
-                if volume.contains(cand_pos):
-                    return None, "inside_no_fly"
+            contains = volume.contains(cand_pos)
             clearance = volume.clearance(cand_pos)
             min_clearance = min(min_clearance, clearance)
-            if clearance < no_fly_required_clearance_m:
-                if allow_adjust:
-                    for attempt2 in range(8 - steps):
-                        steps += 1
-                        safe_v = (volume.v_min + volume.v_max) / 2.0
-                        u_v, v_v, _ = volume.local_coordinates(cand_pos)
-                        push_v = safe_v - v_v
-                        push_dir = safe_normalize(np.array([volume.v_axis[0] * push_v, volume.v_axis[1] * push_v, 0.0]))
-                        cand_pos = cand_pos + push_dir * 0.5
-                        new_clearance = volume.clearance(cand_pos)
-                        if new_clearance >= no_fly_required_clearance_m:
-                            adjusted = True
-                            min_clearance = new_clearance
-                            break
-                        min_clearance = new_clearance
-                if volume.clearance(cand_pos) < float(DEFAULT_LIMITS["safety_distance_m"]):
-                    min_clearance = volume.clearance(cand_pos)
-                else:
-                    min_clearance = volume.clearance(cand_pos)
+            if contains or clearance + 1e-9 < no_fly_required_clearance_m:
+                if not allow_adjust:
+                    return None, "inside_no_fly" if contains else "clearance"
+                while steps < 12:
+                    push_dir = _no_fly_lateral_push_direction(volume, cand_pos)
+                    current_clearance = volume.clearance(cand_pos)
+                    step_size = max(
+                        0.5,
+                        min(2.5, no_fly_required_clearance_m - current_clearance + 0.25),
+                    )
+                    cand_pos = cand_pos + push_dir * step_size
+                    steps += 1
+                    adjusted = True
+                    contains = volume.contains(cand_pos)
+                    clearance = volume.clearance(cand_pos)
+                    min_clearance = min(min_clearance, clearance)
+                    if (not contains) and clearance + 1e-9 >= no_fly_required_clearance_m:
+                        break
+                contains = volume.contains(cand_pos)
+                clearance = volume.clearance(cand_pos)
+                min_clearance = min(min_clearance, clearance)
+                if contains:
+                    return None, "inside_no_fly"
+                if clearance + 1e-9 < no_fly_required_clearance_m:
+                    return None, "clearance"
+
+        final_min_clearance = float("inf")
+        for volume in conductor_no_fly_volumes:
+            if volume.contains(cand_pos):
+                return None, "inside_no_fly"
+            clearance = volume.clearance(cand_pos)
+            final_min_clearance = min(final_min_clearance, clearance)
+            if clearance + 1e-9 < no_fly_required_clearance_m:
+                return None, "clearance"
 
         for bbox_min, bbox_max, safety_rad, ci in wire_curve_bboxes:
             # Bbox pre-filter: skip if candidate is far from curve
@@ -3126,7 +3169,15 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             if dist < safety_rad:
                 return None, "wire_curve"
 
-        return (cand_pos, float(min_clearance), adjusted, steps, warning), "ok"
+        if len(safety_points):
+            safety_distance = candidate_safety_index.min_distance(
+                cand_pos,
+                search_radius_m=max(float(DEFAULT_LIMITS["safety_distance_m"]) * 2.5, 10.0),
+            )
+            if safety_distance + 1e-9 < float(DEFAULT_LIMITS["safety_distance_m"]):
+                return None, "tower_safety"
+
+        return (cand_pos, float(final_min_clearance), adjusted, steps, warning), "ok"
 
     def add_candidate(
         position: Sequence[float],
@@ -3141,6 +3192,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         cluster_id: Optional[str] = None,
         target_id: Optional[int] = None,
         target_weight: Optional[float] = None,
+        required_resolution: Optional[float] = None,
         max_view_angle_deg: Optional[float] = None,
         instance_id: Optional[int] = None,
         layer_id: Optional[int] = None,
@@ -3168,14 +3220,15 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                 filter_stats["inside_no_fly_rejected"] += 1
             elif reject_reason == "clearance":
                 filter_stats["clearance_rejected"] += 1
+            elif reject_reason == "tower_safety":
+                filter_stats["tower_safety_rejected"] += 1
             else:
                 filter_stats["inside_no_fly_rejected"] += 1
             return
         safe_pos, no_fly_clearance, was_adjusted, adjust_steps, safety_warn = safety_result
-        if no_fly_clearance < no_fly_required_clearance_m and no_fly_clearance < DEFAULT_LIMITS["safety_distance_m"]:
-            if no_fly_clearance < float(DEFAULT_LIMITS["safety_distance_m"]) - 0.1:
-                filter_stats["clearance_rejected"] += 1
-                return
+        if no_fly_clearance + 1e-9 < no_fly_required_clearance_m:
+            filter_stats["clearance_rejected"] += 1
+            return
         position = safe_pos
 
         # --- Compute view geometry from position → target ---
@@ -3192,6 +3245,12 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
 
         # --- Focal length: use continuous value, compute FOV ---
         resolved_aim_type = aim_type or semantic_focus
+        resolved_semantic = _normalize_semantic(semantic_focus)
+        req_resolution = (
+            float(required_resolution)
+            if required_resolution is not None
+            else float(REQUIRED_RESOLUTION.get(resolved_semantic, REQUIRED_RESOLUTION.get(semantic_focus, 0.7)))
+        )
         if action_name == "none":
             focal_length_eq_mm = None
             focal_is_estimated = False
@@ -3201,28 +3260,26 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             f_eq_mm_value = None
             focal_key = None
         else:
-            # Legacy: if focal_level string was passed, map to f_eq_mm
-            if focal_level and focal_level in SUPPORTED_FOCALS:
-                if focal_length_eq_mm is None:
-                    focal_length_eq_mm = SUPPORTED_FOCALS[focal_level]["f_eq_mm"]
-                focal_key = focal_level
-            else:
-                focal_key = None
+            focal_key = None
 
+            focal_was_explicit = focal_length_eq_mm is not None
             if focal_length_eq_mm is None:
-                focal_length_eq_mm = choose_focal_length_eq_mm(resolved_aim_type, distance)
+                focal_length_eq_mm = choose_focal_length_eq_mm(
+                    aim_type=resolved_aim_type,
+                    distance=distance,
+                    required_resolution=req_resolution,
+                )
             if focal_length_eq_mm is None:
                 focal_length_eq_mm = 48.0  # safety fallback
-            focal_length_eq_mm = float(focal_length_eq_mm)
+            focal_length_eq_mm = max(24.0, min(84.0, float(focal_length_eq_mm)))
             focal_is_estimated = True
-            focal_source = "aimtype_distance_rule"
+            focal_source = "explicit" if focal_was_explicit else "aimtype_resolution_auto"
             hfov_deg_value = round(math.degrees(2.0 * math.atan(CAMERA_SENSOR_WIDTH_MM / (2.0 * focal_length_eq_mm))), 3)
             vfov_deg_value = round(math.degrees(2.0 * math.atan(CAMERA_SENSOR_HEIGHT_MM / (2.0 * focal_length_eq_mm))), 3)
             f_eq_mm_value = focal_length_eq_mm
             # Backward-compat focal_level: map continuous to closest named level
-            if focal_key is None:
-                best_level = min(SUPPORTED_FOCALS.items(), key=lambda kv: abs(kv[1]["f_eq_mm"] - focal_length_eq_mm))
-                focal_key = best_level[0]
+            best_level = min(SUPPORTED_FOCALS.items(), key=lambda kv: abs(kv[1]["f_eq_mm"] - focal_length_eq_mm))
+            focal_key = best_level[0]
 
         # Distance validation
         if action_name == "photo" and resolved_aim_type in AIMTYPE_VIEW_PROFILE:
@@ -3249,14 +3306,16 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         ):
             return
 
-        # Dedup key (position + heading + pitch + semantic, no focal)
+        # Dedup key: waypoint position + target point. Focal is target-driven, not a candidate dimension.
         key = (
             round(float(position[0]), 3),
             round(float(position[1]), 3),
             round(float(position[2]), 3),
-            round(heading, 2),
-            round(pitch, 2),
+            round(float(target[0]), 3),
+            round(float(target[1]), 3),
+            round(float(target[2]), 3),
             semantic_focus,
+            None if target_id is None else int(target_id),
         )
         if key in seen:
             return
@@ -3303,6 +3362,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             "sector_id": sector_id,
             "weight": target_weight if target_weight is not None else SEMANTIC_WEIGHTS.get(semantic_focus, 1.0),
             "required_gsd": None,
+            "required_resolution": round(float(req_resolution), 6),
             "max_view_angle_deg": max_view_angle_deg if max_view_angle_deg is not None else INCIDENCE_THRESHOLDS.get(semantic_focus, 65.0),
             "no_fly_checked": True,
             "no_fly_inside": False,
@@ -3327,10 +3387,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         if semantic not in ("insulator", "conductor_insulator_connection", "wire_insulator_connection", "insulator_tower_side_connection", "ground_wire_tower_connection"):
             return
         target_arr = np.asarray(target, dtype=float)
-        exterior_clearance = max(
-            DEFAULT_LIMITS["safety_distance_m"] + 1.5,
-            DEFAULT_LIMITS["conductor_no_fly_exterior_clearance_m"],
-        )
+        exterior_clearance = no_fly_required_clearance_m
         for volume in conductor_no_fly_volumes:
             u_value, v_value, _ = volume.local_coordinates(target_arr)
             if u_value < volume.u_min - 5.0 or u_value > volume.u_max + 5.0:
@@ -3477,12 +3534,14 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                 "sector_id": sector_id,
                 "coords": [],
                 "weights": [],
+                "required_resolution": [],
                 "max_view_angle_deg": [],
                 "target_ids": [],
             }
         patch = tower_patches[patch_key]
         patch["coords"].append(np.asarray(record.get("coord", local_center), dtype=float))
         patch["weights"].append(float(record.get("weight", 1.0)))
+        patch["required_resolution"].append(float(record.get("required_resolution", REQUIRED_RESOLUTION.get(semantic, 0.7))))
         patch["max_view_angle_deg"].append(float(record.get("max_view_angle_deg",
                                             INCIDENCE_THRESHOLDS.get(semantic, 65.0))))
         patch["target_ids"].append(record.get("id"))
@@ -3503,6 +3562,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         max_per_patch = int(profile.get("max_candidates_per_layer_sector", 3))
         coords = np.asarray(patch["coords"], dtype=float)
         weights = np.asarray(patch["weights"], dtype=float)
+        req_res = float(np.mean(np.asarray(patch["required_resolution"], dtype=float))) if patch.get("required_resolution") else REQUIRED_RESOLUTION.get(semantic, 0.7)
         n_patch_cells = len(coords)
         if n_patch_cells == 0:
             continue
@@ -3547,6 +3607,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             add_candidate(pos, centroid, semantic,
                           aim_type=aim_key,
                           target_weight=tgt_weight,
+                          required_resolution=req_res,
                           layer_id=int(patch["layer_id"]),
                           sector_id=int(patch["sector_id"]),
                           source="tower_patch_aimtype")
@@ -3575,9 +3636,12 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             add_candidate(pos, target, "insulator", aim_type="insulator_string",
                           cluster_id=cluster_id, target_id=record.get("id"),
                           target_weight=record.get("weight"),
+                          required_resolution=record.get("required_resolution"),
                           max_view_angle_deg=record.get("max_view_angle_deg"),
                           instance_id=record.get("insulator_instance_id", record.get("instance_id")),
                           source="legacy_insulator_voxel")
+            if conductor_no_fly_volumes:
+                add_no_fly_exterior_candidates(target, "insulator", cluster_id)
         tower_raw_by_source["insulator_legacy_voxel"] = len(legacy_insulator_records)
 
     # --- Attention / connection candidates: ≤3 per target, AIMTYPE_VIEW_PROFILE driven ---
@@ -3683,6 +3747,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                               cluster_id=cluster_id,
                               target_id=record.get("id"),
                               target_weight=record.get("weight"),
+                              required_resolution=record.get("required_resolution"),
                               max_view_angle_deg=record.get("max_view_angle_deg"),
                               instance_id=record.get("instance_id"),
                               layer_id=record.get("layer_id"),
@@ -3718,6 +3783,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                                       cluster_id=cluster_id,
                                       target_id=record.get("id"),
                                       target_weight=record.get("weight"),
+                                      required_resolution=record.get("required_resolution"),
                                       max_view_angle_deg=record.get("max_view_angle_deg"),
                                       instance_id=record.get("instance_id"),
                                       layer_id=record.get("layer_id"),
@@ -3734,9 +3800,17 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
 
     # --- Insulator instance candidates: ≤6 per instance, AIMTYPE_VIEW_PROFILE driven ---
     if insulator_instances_list and insulator_mode == "instance_based":
-        ins_profile = AIMTYPE_VIEW_PROFILE.get("insulator_string", {})
-        pref_dist = float(ins_profile.get("preferred_distance_m", 16.0))
-        max_per_inst = int(ins_profile.get("max_candidates_per_instance", 6))
+        max_per_inst = int(INSULATOR_INSTANCE_VIEW_CONFIG.get("max_candidates_per_instance", 30))
+        direction_names = list(INSULATOR_INSTANCE_VIEW_CONFIG.get("directions", [])) or [
+            "outward",
+            "outward_plus_line",
+            "outward_minus_line",
+            "outward_plus_z",
+            "outward_minus_z",
+        ]
+        distances = [float(value) for value in INSULATOR_INSTANCE_VIEW_CONFIG.get("distances", [4.5, 6.0, 7.5])]
+        height_offsets = [float(value) for value in INSULATOR_INSTANCE_VIEW_CONFIG.get("height_offsets", [0.0])]
+        yaw_offsets_deg = [float(value) for value in INSULATOR_INSTANCE_VIEW_CONFIG.get("yaw_offsets_deg", [0.0])]
         inst_count = 0
         for inst_idx, inst in enumerate(insulator_instances_list):
             if not isinstance(inst, dict):
@@ -3744,6 +3818,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             frag_type = str(inst.get("fragment_type", ""))
             if frag_type in ("noise_fragment", "excluded_from_candidates"):
                 continue
+            instance_id = int(inst.get("id", inst_idx) or inst_idx)
             inst_center = np.asarray(inst.get("center", local_center), dtype=float)
             inst_axis = safe_normalize(np.asarray(inst.get("axis", [0.0, 0.0, 1.0]), dtype=float))
             outward_2d = safe_normalize(inst_center[:2] - local_center[:2])
@@ -3760,29 +3835,45 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                 "outward_plus_z": safe_normalize(np.array([outward_2d[0], outward_2d[1], 0.3])),
                 "outward_minus_z": safe_normalize(np.array([outward_2d[0], outward_2d[1], -0.3])),
             }
-            # Priority: front, left, right, up, down
-            dir_order = ["outward", "outward_plus_line", "outward_minus_line",
-                         "outward_plus_z", "outward_minus_z"]
-
             inst_candidates = 0
-            for dir_name in dir_order:
+            for dir_name in direction_names:
+                base_dir = safe_normalize(dir_map.get(dir_name, np.array([outward_2d[0], outward_2d[1], 0.0])))
+                for distance in distances:
+                    for height_offset in height_offsets:
+                        for yaw_offset_deg in yaw_offsets_deg:
+                            if inst_candidates >= max_per_inst:
+                                break
+                            yaw_rad = math.radians(float(yaw_offset_deg))
+                            rot_dir = np.array([
+                                base_dir[0] * math.cos(yaw_rad) - base_dir[1] * math.sin(yaw_rad),
+                                base_dir[0] * math.sin(yaw_rad) + base_dir[1] * math.cos(yaw_rad),
+                                base_dir[2],
+                            ])
+                            rot_dir = safe_normalize(rot_dir)
+                            target = inst_center.copy()
+                            target[2] += float(height_offset)
+                            pos = np.array([
+                                target[0] + rot_dir[0] * float(distance),
+                                target[1] + rot_dir[1] * float(distance),
+                                target[2] + rot_dir[2] * float(distance),
+                            ])
+                            count_before = len(candidates)
+                            add_candidate(pos, target, "insulator",
+                                          aim_type="insulator_string",
+                                          target_weight=POWER_MODEL_CONFIG["insulator_weight"],
+                                          required_resolution=REQUIRED_RESOLUTION.get("insulator", 1.5),
+                                          max_view_angle_deg=POWER_MODEL_CONFIG["insulator_max_view_angle_deg"],
+                                          instance_id=instance_id,
+                                          layer_id=None, sector_id=None,
+                                          source="insulator_instance_multi_distance")
+                            if len(candidates) > count_before:
+                                inst_candidates += 1
+                        if inst_candidates >= max_per_inst:
+                            break
+                    if inst_candidates >= max_per_inst:
+                        break
                 if inst_candidates >= max_per_inst:
                     break
-                dvec = dir_map.get(dir_name, outward_2d)
-                # Use preferred_distance from profile
-                pos = np.array([
-                    inst_center[0] + dvec[0] * pref_dist,
-                    inst_center[1] + dvec[1] * pref_dist,
-                    inst_center[2] + dvec[2] * pref_dist,
-                ])
-                add_candidate(pos, inst_center, "insulator",
-                              aim_type="insulator_string",
-                              target_weight=POWER_MODEL_CONFIG["insulator_weight"],
-                              max_view_angle_deg=POWER_MODEL_CONFIG["insulator_max_view_angle_deg"],
-                              instance_id=inst_idx,
-                              layer_id=None, sector_id=None,
-                              source="insulator_instance_aimtype")
-                inst_candidates += 1
             inst_count += 1
         tower_raw_by_source["insulator_instance"] = inst_count
 
@@ -3850,20 +3941,6 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         "removed": thinning_removed,
         "max_total": MAX_CANDIDATES_TOTAL,
     }
-
-    # --- fallback relaxed clearance ---
-    min_keep = max(POWER_MODEL_CONFIG["candidate_filter_min_count"],
-                   int(filter_stats["raw_candidate_count"] * POWER_MODEL_CONFIG["candidate_filter_min_keep_ratio"]))
-    if len(candidates) < min_keep and candidates:
-        filter_stats["fallback_relaxed_clearance_used"] = True
-        relaxed_clearance = float(DEFAULT_LIMITS["safety_distance_m"]) * 0.7
-        fallback_candidates = []
-        for cand in candidates:
-            if float(cand.get("no_fly_clearance_m", 999.0)) >= relaxed_clearance:
-                fallback_candidates.append(cand)
-        if len(fallback_candidates) >= max(min_keep, len(candidates) * 0.5):
-            candidates = fallback_candidates
-            filter_stats["final_candidate_count"] = len(candidates)
 
     candidates.sort(
         key=lambda item: (
@@ -3998,6 +4075,16 @@ class CandidateViewpoint:
     focal_length_eq_mm: Optional[float] = None
     action_name: str = "photo"
     aim_type: Optional[str] = None
+    target_id: Optional[int] = None
+    instance_id: Optional[int] = None
+    layer_id: Optional[int] = None
+    sector_id: Optional[int] = None
+    weight: Optional[float] = None
+    no_fly_checked: bool = False
+    safety_checked: bool = False
+    no_fly_clearance_m: Optional[float] = None
+    no_fly_required_clearance_m: Optional[float] = None
+    required_resolution: Optional[float] = None
 
 
 def load_candidate_views(cand_path: str) -> List[CandidateViewpoint]:
@@ -4059,6 +4146,28 @@ def load_candidate_views(cand_path: str) -> List[CandidateViewpoint]:
                 focal_length_eq_mm=float(item["focal_length_eq_mm"]) if item.get("focal_length_eq_mm") is not None else None,
                 action_name=str(item.get("actionName", "photo")),
                 aim_type=_decode_text(item.get("AimType"), None),
+                target_id=int(item["target_id"]) if item.get("target_id") is not None else None,
+                instance_id=(
+                    int(item["instance_id"])
+                    if item.get("instance_id") is not None
+                    else int(item["insulator_instance_id"]) if item.get("insulator_instance_id") is not None else None
+                ),
+                layer_id=int(item["layer_id"]) if item.get("layer_id") is not None else None,
+                sector_id=int(item["sector_id"]) if item.get("sector_id") is not None else None,
+                weight=float(item["weight"]) if item.get("weight") is not None else None,
+                no_fly_checked=bool(item.get("no_fly_checked", False)),
+                safety_checked=bool(item.get("safety_checked", False)),
+                no_fly_clearance_m=float(item["no_fly_clearance_m"]) if item.get("no_fly_clearance_m") is not None else None,
+                no_fly_required_clearance_m=(
+                    float(item["no_fly_required_clearance_m"])
+                    if item.get("no_fly_required_clearance_m") is not None
+                    else None
+                ),
+                required_resolution=(
+                    float(item["required_resolution"])
+                    if item.get("required_resolution") is not None
+                    else None
+                ),
             )
         )
     return candidates
@@ -4094,6 +4203,7 @@ def _normalize_voxel_record(raw_voxel, local_center: np.ndarray, z_min: float, z
 
     return {
         "coord": coord.tolist(),
+        "id": record.get("id"),
         "label": label,
         "category": "insulator" if semantic == "insulator" else "tower",
         "semantic": semantic,
@@ -4103,6 +4213,10 @@ def _normalize_voxel_record(raw_voxel, local_center: np.ndarray, z_min: float, z
         "required_resolution": float(record.get("required_resolution", REQUIRED_RESOLUTION.get(semantic, 0.7))),
         "incidence_max_deg": float(record.get("incidence_max_deg", INCIDENCE_THRESHOLDS.get(semantic, 65.0))),
         "normal_hint": normalize_vector(normal_hint).tolist(),
+        "instance_id": record.get("instance_id", record.get("insulator_instance_id")),
+        "insulator_instance_id": record.get("insulator_instance_id", record.get("instance_id")),
+        "layer_id": record.get("layer_id"),
+        "sector_id": record.get("sector_id"),
     }
 
 
@@ -4207,6 +4321,37 @@ class PlanningEnvironment:
         self.conductor_no_fly_source = (
             self.conductor_no_fly_volumes[0].source if self.conductor_no_fly_volumes else None
         )
+        self.raw_target_mask = np.ones(self.target_count, dtype=bool)
+        self.observable_target_mask = self.raw_target_mask.copy()
+        self.effective_target_mask = self.observable_target_mask.copy()
+        self.unobservable_target_mask = self.raw_target_mask & ~self.observable_target_mask
+        self.target_observability_reason = np.full(
+            self.target_count,
+            "observable_by_default",
+            dtype="<U32",
+        )
+        self.target_observability_probe_options: Dict[int, List[Dict[str, object]]] = {}
+        self.observability_gap_repair_records: List[Dict[str, object]] = []
+        self.observability_gap_repair_stats: Dict[str, object] = {
+            "observability_gap_repair_raw_attempts": 0,
+            "observability_gap_repair_added": 0,
+            "observability_gap_repair_by_semantic": {},
+            "observability_gap_repair_covered_targets": 0,
+        }
+        self.raw_total_weight = float(np.sum(self.weights[self.raw_target_mask])) if self.target_count else 0.0
+        self.effective_total_weight = float(np.sum(self.weights[self.effective_target_mask])) if self.target_count else 0.0
+        self.effective_semantic_totals = {
+            semantic: int(np.sum(np.logical_and(self.semantics == semantic, self.effective_target_mask)))
+            for semantic in TARGET_SEMANTICS
+        }
+        self.effective_weight_totals = {
+            semantic: float(np.sum(self.weights[np.logical_and(self.semantics == semantic, self.effective_target_mask)]))
+            for semantic in TARGET_SEMANTICS
+        }
+        self.target_observability_stats = self._build_observability_stats(
+            safe_candidate_count=0,
+            probe_count=0,
+        )
 
     @property
     def target_count(self) -> int:
@@ -4233,9 +4378,629 @@ class PlanningEnvironment:
             return float("inf")
         return float(min(volume.clearance(position) for volume in self.conductor_no_fly_volumes))
 
+    def _position_safe_for_observability(
+        self,
+        position: Sequence[float],
+        safety_distance_m: float,
+        conductor_no_fly_enabled: bool,
+        conductor_no_fly_clearance_m: float,
+        conductor_no_fly_boundary_tolerance_m: float,
+    ) -> bool:
+        if conductor_no_fly_enabled and self.inside_conductor_no_fly(
+            position,
+            tolerance_m=conductor_no_fly_boundary_tolerance_m,
+        ):
+            return False
+        if conductor_no_fly_enabled and self.min_conductor_no_fly_clearance(position) + 1e-9 < conductor_no_fly_clearance_m:
+            return False
+        return self.min_safety_distance(position, safety_distance_m) + 1e-9 >= safety_distance_m
+
+    def _diagnostic_probe_distances(self, target_index: int) -> List[float]:
+        semantic = str(self.semantics[target_index])
+        req_resolution = max(float(self.required_resolution[target_index]), 1e-6)
+        focal_cfg = SUPPORTED_FOCALS.get("F2") or next(reversed(SUPPORTED_FOCALS.values()))
+        max_distance = min(
+            DEFAULT_LIMITS["max_visibility_distance_m"] * 0.9,
+            max(float(focal_cfg["min_distance_m"]) + 1.0, float(focal_cfg["f_eq_mm"]) / 24.0 * 8.0 / req_resolution * 0.92),
+        )
+        if semantic == "insulator":
+            preferred = (6.0, 8.0, 12.0, 16.0)
+        elif semantic in {"tower_top", "tower_edge"}:
+            preferred = (8.0, 12.0, 18.0, 24.0)
+        else:
+            preferred = (10.0, 16.0, 24.0, 32.0)
+
+        min_distance = float(focal_cfg["min_distance_m"]) + 0.25
+        distances: List[float] = []
+        for distance in preferred:
+            bounded = min(max_distance, max(min_distance, float(distance)))
+            if all(abs(bounded - existing) > 0.5 for existing in distances):
+                distances.append(bounded)
+        return distances[:3]
+
+    def _diagnostic_probe_directions(self, target_index: int) -> List[np.ndarray]:
+        normal = normalize_vector(self.normal_hints[target_index])
+        world_up = np.array([0.0, 0.0, 1.0], dtype=float)
+        tangent = np.cross(normal, world_up)
+        if np.linalg.norm(tangent) <= 1e-6:
+            tangent = np.array([1.0, 0.0, 0.0], dtype=float)
+        tangent = normalize_vector(tangent)
+        bitangent = normalize_vector(np.cross(tangent, normal))
+        return [
+            normal,
+            normalize_vector(normal + 0.22 * tangent),
+            normalize_vector(normal - 0.22 * tangent),
+            normalize_vector(normal + 0.18 * bitangent),
+            normalize_vector(normal - 0.18 * bitangent),
+        ]
+
+    def _diagnostic_probe_record(
+        self,
+        target_index: int,
+        position: np.ndarray,
+        yaw: float,
+        pitch: float,
+        focal_level: str,
+        f_eq_mm: float,
+        hfov_deg: float,
+        vfov_deg: float,
+    ) -> Dict[str, object]:
+        target = np.asarray(self.target_coords[target_index], dtype=float)
+        distance = float(np.linalg.norm(position - target))
+        to_camera = position - target
+        to_camera_norm = to_camera / max(float(np.linalg.norm(to_camera)), 1e-6)
+        normal_hint = normalize_vector(self.normal_hints[target_index])
+        incidence = math.degrees(math.acos(float(np.clip(np.dot(to_camera_norm, normal_hint), -1.0, 1.0))))
+        resolution = observation_resolution(f_eq_mm, distance, incidence)
+        req_resolution = max(float(self.required_resolution[target_index]), 1e-6)
+        max_incidence = max(float(self.incidence_max[target_index]), 1e-6)
+        safety_distance = self.min_safety_distance(position, DEFAULT_LIMITS["safety_distance_m"])
+        no_fly_clearance = self.min_conductor_no_fly_clearance(position)
+        finite_clearance = no_fly_clearance if math.isfinite(float(no_fly_clearance)) else 25.0
+        semantic = str(self.semantics[target_index])
+        preferred_distance = {
+            "insulator": 12.0,
+            "tower_top": 18.0,
+            "tower_edge": 18.0,
+            "tower_body": 24.0,
+        }.get(semantic, 18.0)
+        score = (
+            3.0 * min(float(resolution / req_resolution), 2.5)
+            + 2.0 * max(0.0, 1.0 - float(incidence / max_incidence))
+            + 1.0 / (1.0 + abs(distance - preferred_distance))
+            + 0.35 * min(float(finite_clearance) / 20.0, 1.5)
+            + 0.20 * min(float(safety_distance) / max(DEFAULT_LIMITS["safety_distance_m"], 1e-6), 2.0)
+        )
+        clearance_value = None if not math.isfinite(float(no_fly_clearance)) else round(float(no_fly_clearance), 3)
+        target_record = self.target_records[target_index] if target_index < len(self.target_records) else {}
+        def optional_int(value) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except Exception:
+                return None
+        return {
+            "target_id": int(target_index),
+            "semantic": semantic,
+            "coord": [round(float(v), 3) for v in target],
+            "weight": round(float(self.weights[target_index]), 6),
+            "instance_id": optional_int(target_record.get("instance_id", target_record.get("insulator_instance_id"))),
+            "layer_id": optional_int(target_record.get("layer_id")),
+            "sector_id": optional_int(target_record.get("sector_id")),
+            "reason": "candidate_generation_gap",
+            "probe_position": [round(float(v), 3) for v in position],
+            "probe_heading": round(float(yaw), 3),
+            "probe_pitch": round(float(pitch), 3),
+            "probe_focal_level": focal_level,
+            "probe_f_eq_mm": round(f_eq_mm, 3),
+            "probe_hfov_deg": round(float(hfov_deg), 3),
+            "probe_vfov_deg": round(float(vfov_deg), 3),
+            "probe_distance_m": round(distance, 3),
+            "best_probe_position": [round(float(v), 3) for v in position],
+            "best_probe_heading": round(float(yaw), 3),
+            "best_probe_pitch": round(float(pitch), 3),
+            "best_probe_distance": round(distance, 3),
+            "best_probe_focal_length_eq_mm": round(f_eq_mm, 3),
+            "probe_incidence_deg": round(float(incidence), 3),
+            "probe_resolution": round(float(resolution), 6),
+            "required_resolution": round(float(req_resolution), 6),
+            "no_fly_clearance_m": clearance_value,
+            "nearest_no_fly_clearance_m": clearance_value,
+            "safety_distance_m": round(float(safety_distance), 3),
+            "nearest_safety_distance_m": round(float(safety_distance), 3),
+            "score": round(float(score), 6),
+        }
+
+    def _target_observable_by_diagnostic_probe(
+        self,
+        engine: "VisibilityEngine",
+        target_index: int,
+        safety_distance_m: float,
+        conductor_no_fly_enabled: bool,
+        conductor_no_fly_clearance_m: float,
+        conductor_no_fly_boundary_tolerance_m: float,
+    ) -> Tuple[List[Dict[str, object]], int]:
+        target = np.asarray(self.target_coords[target_index], dtype=float)
+        attempts = 0
+        valid_probes: List[Dict[str, object]] = []
+        aim_type_map = {
+            "insulator": "insulator_string",
+            "tower_top": "tower_top",
+            "tower_edge": "tower_edge",
+            "tower_body": "tower_body",
+        }
+        semantic = str(self.semantics[target_index])
+        req_resolution = float(self.required_resolution[target_index])
+        for direction in self._diagnostic_probe_directions(target_index):
+            for distance in self._diagnostic_probe_distances(target_index):
+                attempts += 1
+                position = target + direction * float(distance)
+                if not self._position_safe_for_observability(
+                    position,
+                    safety_distance_m=safety_distance_m,
+                    conductor_no_fly_enabled=conductor_no_fly_enabled,
+                    conductor_no_fly_clearance_m=conductor_no_fly_clearance_m,
+                    conductor_no_fly_boundary_tolerance_m=conductor_no_fly_boundary_tolerance_m,
+                ):
+                    continue
+                yaw, pitch = yaw_pitch_to_target(position, target)
+                f_eq_mm = choose_focal_length_eq_mm(
+                    aim_type=aim_type_map.get(semantic, semantic),
+                    distance=float(distance),
+                    required_resolution=req_resolution,
+                )
+                if f_eq_mm is None:
+                    f_eq_mm = 48.0
+                f_eq_mm = max(24.0, min(84.0, float(f_eq_mm)))
+                focal_level, _ = normalize_focal_level(None, f_eq_mm)
+                hfov_deg = math.degrees(2.0 * math.atan(CAMERA_SENSOR_WIDTH_MM / (2.0 * f_eq_mm)))
+                vfov_deg = math.degrees(2.0 * math.atan(CAMERA_SENSOR_HEIGHT_MM / (2.0 * f_eq_mm)))
+                visible = engine.visible_indices_for_view(
+                    position=position,
+                    pitch=pitch,
+                    yaw=yaw,
+                    focal_level=focal_level,
+                    f_eq_mm=f_eq_mm,
+                    hfov_deg=hfov_deg,
+                    vfov_deg=vfov_deg,
+                )
+                if len(visible) and int(target_index) in set(int(index) for index in visible):
+                    valid_probes.append(
+                        self._diagnostic_probe_record(
+                            int(target_index),
+                            position,
+                            yaw,
+                            pitch,
+                            focal_level,
+                            f_eq_mm,
+                            hfov_deg,
+                            vfov_deg,
+                        )
+                    )
+        valid_probes.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        return valid_probes, attempts
+
+    def _build_observability_stats(self, safe_candidate_count: int, probe_count: int) -> Dict[str, object]:
+        reason_counts: Dict[str, int] = {}
+        for reason in (
+            "observable_by_candidate",
+            "candidate_generation_gap",
+            "safety_unobservable",
+            "observable_by_default",
+        ):
+            reason_counts[reason] = int(np.sum(self.target_observability_reason == reason))
+        reason_counts["observable_by_probe"] = int(reason_counts.get("candidate_generation_gap", 0))
+
+        semantic_summary: Dict[str, Dict[str, int]] = {}
+        for semantic in TARGET_SEMANTICS:
+            semantic_mask = self.semantics == semantic
+            semantic_summary[semantic] = {
+                "raw": int(np.sum(semantic_mask)),
+                "observable": int(np.sum(np.logical_and(semantic_mask, self.observable_target_mask))),
+                "effective": int(np.sum(np.logical_and(semantic_mask, self.effective_target_mask))),
+                "unobservable": int(np.sum(np.logical_and(semantic_mask, self.unobservable_target_mask))),
+                "observable_by_candidate": int(np.sum(np.logical_and(semantic_mask, self.target_observability_reason == "observable_by_candidate"))),
+                "candidate_generation_gap": int(np.sum(np.logical_and(semantic_mask, self.target_observability_reason == "candidate_generation_gap"))),
+                "safety_unobservable": int(np.sum(np.logical_and(semantic_mask, self.target_observability_reason == "safety_unobservable"))),
+            }
+
+        raw_count = int(np.sum(self.raw_target_mask))
+        effective_count = int(np.sum(self.effective_target_mask))
+        unobservable_count = int(np.sum(self.unobservable_target_mask))
+        raw_weight = float(np.sum(self.weights[self.raw_target_mask])) if raw_count else 0.0
+        excluded_weight = float(np.sum(self.weights[self.unobservable_target_mask])) if unobservable_count else 0.0
+        semantic_rank = {semantic: rank for rank, semantic in enumerate(GAP_REPAIR_SEMANTIC_PRIORITY)}
+        gap_targets: List[Dict[str, object]] = []
+        for target_index in np.where(self.target_observability_reason == "candidate_generation_gap")[0]:
+            probes = self.target_observability_probe_options.get(int(target_index), [])
+            best_probe = dict(probes[0]) if probes else {
+                "target_id": int(target_index),
+                "semantic": str(self.semantics[target_index]),
+                "coord": [round(float(v), 3) for v in self.target_coords[target_index]],
+                "weight": round(float(self.weights[target_index]), 6),
+                "reason": "candidate_generation_gap",
+            }
+            gap_targets.append(best_probe)
+        gap_targets.sort(
+            key=lambda item: (
+                semantic_rank.get(str(item.get("semantic")), 999),
+                -float(item.get("weight") or 0.0),
+                int(item.get("target_id") or 0),
+            )
+        )
+        gap_summary: Dict[str, int] = {}
+        for item in gap_targets:
+            semantic = str(item.get("semantic", "unknown"))
+            gap_summary[semantic] = gap_summary.get(semantic, 0) + 1
+        repaired_targets = list(getattr(self, "observability_gap_repair_records", []))
+        repaired_targets.sort(
+            key=lambda item: (
+                semantic_rank.get(str(item.get("semantic")), 999),
+                -float(item.get("weight") or 0.0),
+                int(item.get("target_id") or 0),
+                int(item.get("candidate_id") or 0),
+            )
+        )
+        repair_stats = dict(getattr(self, "observability_gap_repair_stats", {}) or {})
+        return {
+            "coverage_basis": "observable_effective_targets",
+            "raw_target_count": raw_count,
+            "observable_target_count": int(np.sum(self.observable_target_mask)),
+            "effective_target_count": effective_count,
+            "unobservable_target_count": unobservable_count,
+            "unobservable_ratio": round(float(unobservable_count / raw_count), 6) if raw_count else None,
+            "excluded_weight_ratio": round(float(excluded_weight / max(raw_weight, 1e-9)), 6) if raw_count else None,
+            "reason_counts": reason_counts,
+            "semantic_summary": semantic_summary,
+            "candidate_generation_gap_targets": gap_targets,
+            "candidate_generation_gap_summary": gap_summary,
+            "repaired_candidate_generation_gap_targets": repaired_targets,
+            "gap_repair_candidate_count": int(len(repaired_targets)),
+            **repair_stats,
+            "safe_candidate_count": int(safe_candidate_count),
+            "diagnostic_probe_count": int(probe_count),
+        }
+
+    def update_observability_from_candidates(
+        self,
+        engine: "VisibilityEngine",
+        candidates: Sequence[CandidateViewpoint],
+        safety_distance_m: float,
+        conductor_no_fly_enabled: bool = True,
+        conductor_no_fly_clearance_m: float = 0.0,
+        conductor_no_fly_boundary_tolerance_m: float = DEFAULT_LIMITS["conductor_no_fly_boundary_tolerance_m"],
+    ) -> Dict[str, object]:
+        if conductor_no_fly_clearance_m <= 0.0:
+            conductor_no_fly_clearance_m = required_no_fly_clearance_m(safety_distance_m)
+        raw_mask = np.ones(self.target_count, dtype=bool)
+        observable_by_candidate = np.zeros(self.target_count, dtype=bool)
+        self.target_observability_probe_options = {}
+        safe_candidate_count = 0
+        for candidate in candidates:
+            if str(getattr(candidate, "action_name", "photo") or "photo").lower() != "photo":
+                continue
+            if not self._position_safe_for_observability(
+                candidate.position,
+                safety_distance_m=safety_distance_m,
+                conductor_no_fly_enabled=conductor_no_fly_enabled,
+                conductor_no_fly_clearance_m=conductor_no_fly_clearance_m,
+                conductor_no_fly_boundary_tolerance_m=conductor_no_fly_boundary_tolerance_m,
+            ):
+                continue
+            safe_candidate_count += 1
+            visible = engine.visible_indices_for_view(
+                position=candidate.position,
+                pitch=candidate.pitch,
+                yaw=candidate.yaw,
+                focal_level=candidate.focal_level,
+                f_eq_mm=candidate.f_eq_mm,
+                hfov_deg=candidate.hfov_deg,
+                vfov_deg=candidate.vfov_deg,
+            )
+            if len(visible):
+                observable_by_candidate[visible] = True
+
+        observable_by_probe = np.zeros(self.target_count, dtype=bool)
+        probe_count = 0
+        for target_index in np.where(np.logical_and(raw_mask, ~observable_by_candidate))[0]:
+            probe_options, attempts = self._target_observable_by_diagnostic_probe(
+                engine,
+                int(target_index),
+                safety_distance_m=safety_distance_m,
+                conductor_no_fly_enabled=conductor_no_fly_enabled,
+                conductor_no_fly_clearance_m=conductor_no_fly_clearance_m,
+                conductor_no_fly_boundary_tolerance_m=conductor_no_fly_boundary_tolerance_m,
+            )
+            probe_count += attempts
+            if probe_options:
+                observable_by_probe[target_index] = True
+                self.target_observability_probe_options[int(target_index)] = probe_options
+
+        self.raw_target_mask = raw_mask
+        self.observable_target_mask = np.logical_or(observable_by_candidate, observable_by_probe)
+        self.effective_target_mask = self.observable_target_mask.copy()
+        self.unobservable_target_mask = self.raw_target_mask & ~self.observable_target_mask
+        self.target_observability_reason = np.full(self.target_count, "safety_unobservable", dtype="<U32")
+        self.target_observability_reason[observable_by_candidate] = "observable_by_candidate"
+        self.target_observability_reason[observable_by_probe] = "candidate_generation_gap"
+
+        self.raw_total_weight = float(np.sum(self.weights[self.raw_target_mask])) if self.target_count else 0.0
+        self.effective_total_weight = float(np.sum(self.weights[self.effective_target_mask])) if self.target_count else 0.0
+        self.effective_semantic_totals = {
+            semantic: int(np.sum(np.logical_and(self.semantics == semantic, self.effective_target_mask)))
+            for semantic in TARGET_SEMANTICS
+        }
+        self.effective_weight_totals = {
+            semantic: float(np.sum(self.weights[np.logical_and(self.semantics == semantic, self.effective_target_mask)]))
+            for semantic in TARGET_SEMANTICS
+        }
+        self.target_observability_stats = self._build_observability_stats(
+            safe_candidate_count=safe_candidate_count,
+            probe_count=probe_count,
+        )
+        return self.target_observability_stats
+
+    def build_observability_gap_repair_candidates(
+        self,
+        existing_candidates: Sequence[CandidateViewpoint],
+        engine: "VisibilityEngine",
+        safety_distance_m: float,
+        conductor_no_fly_enabled: bool = True,
+        conductor_no_fly_clearance_m: float = 0.0,
+        conductor_no_fly_boundary_tolerance_m: float = DEFAULT_LIMITS["conductor_no_fly_boundary_tolerance_m"],
+        max_total: int = MAX_GAP_REPAIR_CANDIDATES_TOTAL,
+        max_per_target: int = MAX_GAP_REPAIR_CANDIDATES_PER_TARGET,
+        max_targets_per_semantic: int = MAX_GAP_REPAIR_TARGETS_PER_SEMANTIC,
+    ) -> List[CandidateViewpoint]:
+        if not ENABLE_OBSERVABILITY_GAP_REPAIR or self.target_count == 0:
+            self.observability_gap_repair_records = []
+            self.observability_gap_repair_stats = {
+                "observability_gap_repair_raw_attempts": 0,
+                "observability_gap_repair_added": 0,
+                "observability_gap_repair_by_semantic": {},
+                "observability_gap_repair_covered_targets": 0,
+            }
+            return []
+        if conductor_no_fly_clearance_m <= 0.0:
+            conductor_no_fly_clearance_m = required_no_fly_clearance_m(safety_distance_m)
+
+        semantic_rank = {semantic: rank for rank, semantic in enumerate(GAP_REPAIR_SEMANTIC_PRIORITY)}
+        gap_indices = [
+            int(index)
+            for index in np.where(self.target_observability_reason == "candidate_generation_gap")[0]
+            if self.target_observability_probe_options.get(int(index))
+        ]
+        gap_indices.sort(
+            key=lambda index: (
+                semantic_rank.get(str(self.semantics[index]), 999),
+                -float(self.weights[index]),
+                index,
+            )
+        )
+
+        existing_keys = set()
+        position_ids: Dict[Tuple[float, float, float], int] = {}
+        max_candidate_id = 0
+        max_position_id = 0
+        for candidate in existing_candidates:
+            max_candidate_id = max(max_candidate_id, int(candidate.id))
+            max_position_id = max(max_position_id, int(candidate.position_id))
+            pos_key = tuple(round(float(v), 3) for v in np.asarray(candidate.position, dtype=float))
+            target = np.asarray(candidate.look_at if candidate.look_at is not None else candidate.target_center, dtype=float)
+            position_ids.setdefault(pos_key, int(candidate.position_id))
+            existing_keys.add((
+                *pos_key,
+                round(float(target[0]), 3),
+                round(float(target[1]), 3),
+                round(float(target[2]), 3),
+                str(candidate.semantic_focus),
+                getattr(candidate, "target_id", None),
+            ))
+
+        def position_id_for(position: Sequence[float]) -> int:
+            nonlocal max_position_id
+            key = tuple(round(float(v), 3) for v in position)
+            if key not in position_ids:
+                max_position_id += 1
+                position_ids[key] = max_position_id
+            return position_ids[key]
+
+        z_min = float(np.min(self.target_coords[:, 2])) if self.target_count else 0.0
+        z_max = float(np.max(self.target_coords[:, 2])) if self.target_count else 0.0
+        height = max(z_max - z_min, 1e-6)
+        aim_type_map = {
+            "insulator": "insulator_string",
+            "tower_top": "tower_top",
+            "tower_edge": "tower_edge",
+            "tower_body": "tower_body",
+        }
+
+        promoted: List[CandidateViewpoint] = []
+        repair_records: List[Dict[str, object]] = []
+        targets_by_semantic: Dict[str, int] = {}
+        raw_attempts = 0
+        added_by_semantic: Dict[str, int] = {}
+        covered_targets: set[int] = set()
+
+        def add_candidate(target_index: int, probe: Dict[str, object]) -> Optional[CandidateViewpoint]:
+            nonlocal max_candidate_id, raw_attempts
+            raw_attempts += 1
+            semantic = str(self.semantics[target_index])
+            target = np.asarray(self.target_coords[target_index], dtype=float)
+            position = np.asarray(probe.get("probe_position", probe.get("best_probe_position")), dtype=float)
+            if not self._position_safe_for_observability(
+                position,
+                safety_distance_m=safety_distance_m,
+                conductor_no_fly_enabled=conductor_no_fly_enabled,
+                conductor_no_fly_clearance_m=conductor_no_fly_clearance_m,
+                conductor_no_fly_boundary_tolerance_m=conductor_no_fly_boundary_tolerance_m,
+            ):
+                return None
+            geom = compute_view_geometry(position, target)
+            yaw = float(geom["heading"])
+            pitch = float(geom["pitch"])
+            distance = float(geom["Distance"])
+            aim_type = aim_type_map.get(semantic, semantic)
+            f_eq_mm = choose_focal_length_eq_mm(
+                aim_type=aim_type,
+                distance=distance,
+                required_resolution=float(self.required_resolution[target_index]),
+            )
+            if f_eq_mm is None:
+                f_eq_mm = 48.0
+            f_eq_mm = max(24.0, min(84.0, float(f_eq_mm)))
+            focal_level, _ = normalize_focal_level(None, f_eq_mm)
+            hfov_deg = math.degrees(2.0 * math.atan(CAMERA_SENSOR_WIDTH_MM / (2.0 * f_eq_mm)))
+            vfov_deg = math.degrees(2.0 * math.atan(CAMERA_SENSOR_HEIGHT_MM / (2.0 * f_eq_mm)))
+            visible = engine.visible_indices_for_view(
+                position=position,
+                pitch=pitch,
+                yaw=yaw,
+                focal_level=focal_level,
+                f_eq_mm=f_eq_mm,
+                hfov_deg=hfov_deg,
+                vfov_deg=vfov_deg,
+            )
+            if len(visible) == 0 or int(target_index) not in set(int(index) for index in visible):
+                return None
+            key = (
+                round(float(position[0]), 3),
+                round(float(position[1]), 3),
+                round(float(position[2]), 3),
+                round(float(target[0]), 3),
+                round(float(target[1]), 3),
+                round(float(target[2]), 3),
+                semantic,
+                int(target_index),
+            )
+            if key in existing_keys:
+                return None
+            existing_keys.add(key)
+            target_z_ratio = float((target[2] - z_min) / height)
+            target_vec = target[:2] - self.local_center[:2]
+            target_azimuth = (
+                float((math.degrees(math.atan2(float(target_vec[1]), float(target_vec[0]))) + 360.0) % 360.0)
+                if float(np.linalg.norm(target_vec)) > 1e-6
+                else 0.0
+            )
+            target_record = self.target_records[target_index] if target_index < len(self.target_records) else {}
+            max_candidate_id += 1
+            no_fly_clearance = self.min_conductor_no_fly_clearance(position)
+            candidate = CandidateViewpoint(
+                id=max_candidate_id,
+                position_id=position_id_for(position),
+                position=position,
+                pitch=pitch,
+                yaw=yaw,
+                focal_level=focal_level,
+                f_eq_mm=f_eq_mm,
+                hfov_deg=float(hfov_deg),
+                vfov_deg=float(vfov_deg),
+                semantic_focus=semantic,
+                target_center=target,
+                base_score=0.0,
+                manual_priority=min(1.0, max(0.0, float(self.weights[target_index]) / 5.0)),
+                safety_distance_m=self.min_safety_distance(position, safety_distance_m),
+                source="observability_gap_repair",
+                position_z_ratio=float((position[2] - z_min) / height),
+                target_z_ratio=target_z_ratio,
+                target_azimuth_deg=target_azimuth,
+                target_cluster_id=f"{semantic}_gap_{target_index}",
+                look_at=target,
+                distance=distance,
+                heading=yaw,
+                base_heading=yaw,
+                yaw_offset_deg=0.0,
+                focal_length_eq_mm=f_eq_mm,
+                action_name="photo",
+                aim_type=aim_type,
+                target_id=int(target_index),
+                instance_id=(
+                    int(target_record["instance_id"])
+                    if target_record.get("instance_id") is not None
+                    else None
+                ),
+                layer_id=(
+                    int(target_record["layer_id"])
+                    if target_record.get("layer_id") is not None
+                    else None
+                ),
+                sector_id=(
+                    int(target_record["sector_id"])
+                    if target_record.get("sector_id") is not None
+                    else None
+                ),
+                weight=float(self.weights[target_index]),
+                no_fly_checked=True,
+                safety_checked=True,
+                no_fly_clearance_m=(
+                    float(no_fly_clearance)
+                    if math.isfinite(float(no_fly_clearance))
+                    else None
+                ),
+                no_fly_required_clearance_m=float(conductor_no_fly_clearance_m),
+            )
+            setattr(candidate, "required_resolution", float(self.required_resolution[target_index]))
+            setattr(candidate, "probe_score", float(probe.get("score") or 0.0))
+            return candidate
+
+        for target_index in gap_indices:
+            semantic = str(self.semantics[target_index])
+            if targets_by_semantic.get(semantic, 0) >= max_targets_per_semantic:
+                continue
+            per_target_count = 0
+            for probe in self.target_observability_probe_options.get(target_index, [])[:max_per_target]:
+                if len(promoted) >= max_total:
+                    break
+                candidate = add_candidate(target_index, probe)
+                if candidate is None:
+                    continue
+                promoted.append(candidate)
+
+                repair_record = dict(probe)
+                repair_record["candidate_id"] = int(candidate.id)
+                repair_record["position_id"] = int(candidate.position_id)
+                repair_record["source"] = "observability_gap_repair"
+                repair_record["best_probe_position"] = [round(float(v), 3) for v in candidate.position]
+                repair_record["best_probe_heading"] = round(float(candidate.heading or candidate.yaw), 3)
+                repair_record["best_probe_pitch"] = round(float(candidate.pitch), 3)
+                repair_record["best_probe_distance"] = round(float(candidate.distance or 0.0), 3)
+                repair_record["best_probe_focal_length_eq_mm"] = round(float(candidate.f_eq_mm), 3)
+                repair_records.append(repair_record)
+                added_by_semantic[semantic] = added_by_semantic.get(semantic, 0) + 1
+                covered_targets.add(int(target_index))
+                per_target_count += 1
+            if per_target_count:
+                targets_by_semantic[semantic] = targets_by_semantic.get(semantic, 0) + 1
+            if len(promoted) >= max_total:
+                break
+
+        self.observability_gap_repair_records = repair_records
+        self.observability_gap_repair_stats = {
+            "observability_gap_repair_raw_attempts": int(raw_attempts),
+            "observability_gap_repair_added": int(len(promoted)),
+            "observability_gap_repair_by_semantic": added_by_semantic,
+            "observability_gap_repair_covered_targets": int(len(covered_targets)),
+        }
+        return promoted
+
+    def observability_summary(self) -> Dict[str, object]:
+        return dict(self.target_observability_stats)
+
     def coverage_from_mask(self, covered_mask: Sequence[bool], include_uncovered: bool = True) -> Dict[str, object]:
         mask = np.asarray(covered_mask, dtype=bool)
-        total_count = int(len(mask))
+        if len(mask) != self.target_count:
+            resized = np.zeros(self.target_count, dtype=bool)
+            resized[: min(len(mask), self.target_count)] = mask[: min(len(mask), self.target_count)]
+            mask = resized
+
+        raw_mask = getattr(self, "raw_target_mask", np.ones(self.target_count, dtype=bool))
+        effective_mask = getattr(self, "effective_target_mask", raw_mask)
+        unobservable_mask = getattr(self, "unobservable_target_mask", raw_mask & ~effective_mask)
+        raw_count = int(np.sum(raw_mask))
+        effective_count = int(np.sum(effective_mask))
+        total_count = raw_count
         if total_count == 0:
             return {
                 "coverage": None,
@@ -4243,54 +5008,118 @@ class PlanningEnvironment:
                 "coverage_total": None,
                 "coverage_tower": None,
                 "coverage_insulator": None,
+                "coverage_basis": "observable_effective_targets",
                 "C_geo": None,
                 "C_weighted": None,
+                "C_geo_effective": None,
+                "C_weighted_effective": None,
+                "C_geo_raw": None,
+                "C_weighted_raw": None,
                 "C_ins": None,
                 "C_top": None,
                 "C_edge": None,
                 "C_body": None,
+                "C_ins_effective": None,
+                "C_top_effective": None,
+                "C_edge_effective": None,
+                "C_body_effective": None,
+                "C_ins_raw": None,
+                "C_top_raw": None,
+                "C_edge_raw": None,
+                "C_body_raw": None,
                 "target_count": 0,
+                "raw_target_count": 0,
+                "observable_target_count": 0,
+                "effective_target_count": 0,
+                "unobservable_target_count": 0,
+                "unobservable_ratio": None,
+                "excluded_weight_ratio": None,
                 "covered_count": 0,
+                "covered_effective_count": 0,
+                "covered_raw_count": 0,
                 "uncovered_summary": {semantic: 0 for semantic in TARGET_SEMANTICS},
+                "uncovered_effective_summary": {semantic: 0 for semantic in TARGET_SEMANTICS},
+                "uncovered_raw_summary": {semantic: 0 for semantic in TARGET_SEMANTICS},
+                "unobservable_summary": {semantic: 0 for semantic in TARGET_SEMANTICS},
                 "uncovered_voxels": [],
+                "warnings": [],
             }
 
-        covered_count = int(np.sum(mask))
-        weighted = float(np.sum(self.weights[mask]) / max(self.total_weight, 1e-9))
-        geo = float(covered_count / total_count)
+        covered_effective_mask = np.logical_and(mask, effective_mask)
+        covered_raw_mask = np.logical_and(mask, raw_mask)
+        covered_count = int(np.sum(covered_effective_mask))
+        covered_raw_count = int(np.sum(covered_raw_mask))
+        raw_weight_total = float(np.sum(self.weights[raw_mask])) if raw_count else 0.0
+        effective_weight_total = float(np.sum(self.weights[effective_mask])) if effective_count else 0.0
+        excluded_weight = float(np.sum(self.weights[unobservable_mask])) if raw_count else 0.0
+        weighted_effective = (
+            float(np.sum(self.weights[covered_effective_mask]) / max(effective_weight_total, 1e-9))
+            if effective_count
+            else None
+        )
+        weighted_raw = (
+            float(np.sum(self.weights[covered_raw_mask]) / max(raw_weight_total, 1e-9))
+            if raw_count
+            else None
+        )
+        geo_effective = float(covered_count / effective_count) if effective_count else None
+        geo_raw = float(covered_raw_count / raw_count) if raw_count else None
 
         result: Dict[str, object] = {
-            "coverage": round(weighted, 6),
-            "coverage_weighted": round(weighted, 6),
-            "coverage_total": round(geo, 6),
-            "C_geo": round(geo, 6),
-            "C_weighted": round(weighted, 6),
-            "target_count": total_count,
+            "coverage_basis": "observable_effective_targets",
+            "coverage": round(weighted_effective, 6) if weighted_effective is not None else None,
+            "coverage_weighted": round(weighted_effective, 6) if weighted_effective is not None else None,
+            "coverage_total": round(geo_effective, 6) if geo_effective is not None else None,
+            "C_geo": round(geo_effective, 6) if geo_effective is not None else None,
+            "C_weighted": round(weighted_effective, 6) if weighted_effective is not None else None,
+            "C_geo_effective": round(geo_effective, 6) if geo_effective is not None else None,
+            "C_weighted_effective": round(weighted_effective, 6) if weighted_effective is not None else None,
+            "C_geo_raw": round(geo_raw, 6) if geo_raw is not None else None,
+            "C_weighted_raw": round(weighted_raw, 6) if weighted_raw is not None else None,
+            "target_count": effective_count,
+            "raw_target_count": raw_count,
+            "observable_target_count": int(np.sum(getattr(self, "observable_target_mask", effective_mask))),
+            "effective_target_count": effective_count,
+            "unobservable_target_count": int(np.sum(unobservable_mask)),
+            "unobservable_ratio": round(float(np.sum(unobservable_mask) / raw_count), 6) if raw_count else None,
+            "excluded_weight_ratio": round(float(excluded_weight / max(raw_weight_total, 1e-9)), 6) if raw_count else None,
             "covered_count": covered_count,
+            "covered_effective_count": covered_count,
+            "covered_raw_count": covered_raw_count,
         }
 
         tower_mask = np.isin(self.semantics, ["tower_top", "tower_edge", "tower_body"])
-        tower_total = int(np.sum(tower_mask))
-        tower_covered = int(np.sum(mask[tower_mask]))
+        tower_effective_mask = np.logical_and(tower_mask, effective_mask)
+        tower_total = int(np.sum(tower_effective_mask))
+        tower_covered = int(np.sum(np.logical_and(mask, tower_effective_mask)))
         result["coverage_tower"] = round(float(tower_covered / tower_total), 6) if tower_total else None
         result["tower_target_count"] = tower_total
         result["covered_tower_count"] = tower_covered
 
-        ins_mask = self.semantics == "insulator"
+        ins_mask = np.logical_and(self.semantics == "insulator", effective_mask)
         ins_total = int(np.sum(ins_mask))
-        ins_covered = int(np.sum(mask[ins_mask]))
+        ins_covered = int(np.sum(np.logical_and(mask, ins_mask)))
         result["coverage_insulator"] = round(float(ins_covered / ins_total), 6) if ins_total else None
         result["insulator_target_count"] = ins_total
         result["covered_insulator_count"] = ins_covered
 
-        uncovered_summary = {}
+        uncovered_effective_summary = {}
+        uncovered_raw_summary = {}
+        unobservable_summary = {}
         uncovered_voxels = []
         for semantic in TARGET_SEMANTICS:
-            semantic_mask = self.semantics == semantic
-            total_sem = int(np.sum(semantic_mask))
-            covered_sem = int(np.sum(mask[semantic_mask]))
-            uncovered_summary[semantic] = max(total_sem - covered_sem, 0)
-            coverage_value = float(covered_sem / total_sem) if total_sem else None
+            semantic_raw_mask = np.logical_and(self.semantics == semantic, raw_mask)
+            semantic_effective_mask = np.logical_and(self.semantics == semantic, effective_mask)
+            semantic_unobservable_mask = np.logical_and(self.semantics == semantic, unobservable_mask)
+            raw_total_sem = int(np.sum(semantic_raw_mask))
+            raw_covered_sem = int(np.sum(np.logical_and(mask, semantic_raw_mask)))
+            effective_total_sem = int(np.sum(semantic_effective_mask))
+            effective_covered_sem = int(np.sum(np.logical_and(mask, semantic_effective_mask)))
+            uncovered_effective_summary[semantic] = max(effective_total_sem - effective_covered_sem, 0)
+            uncovered_raw_summary[semantic] = max(raw_total_sem - raw_covered_sem, 0)
+            unobservable_summary[semantic] = int(np.sum(semantic_unobservable_mask))
+            coverage_value = float(effective_covered_sem / effective_total_sem) if effective_total_sem else None
+            raw_coverage_value = float(raw_covered_sem / raw_total_sem) if raw_total_sem else None
             metric_name = {
                 "insulator": "C_ins",
                 "tower_top": "C_top",
@@ -4298,16 +5127,29 @@ class PlanningEnvironment:
                 "tower_body": "C_body",
             }[semantic]
             result[metric_name] = round(coverage_value, 6) if coverage_value is not None else None
-            if include_uncovered and uncovered_summary[semantic] > 0:
-                indices = np.where(np.logical_and(semantic_mask, ~mask))[0]
+            result[f"{metric_name}_effective"] = round(coverage_value, 6) if coverage_value is not None else None
+            result[f"{metric_name}_raw"] = round(raw_coverage_value, 6) if raw_coverage_value is not None else None
+            result[f"{semantic}_raw_target_count"] = raw_total_sem
+            result[f"{semantic}_effective_target_count"] = effective_total_sem
+            result[f"{semantic}_unobservable_target_count"] = int(np.sum(semantic_unobservable_mask))
+            if include_uncovered and uncovered_effective_summary[semantic] > 0:
+                indices = np.where(np.logical_and(semantic_effective_mask, ~mask))[0]
                 for index in indices[:120]:
                     uncovered_voxels.append({
                         "coord": [round(float(v), 3) for v in self.target_coords[index]],
                         "semantic": semantic,
                     })
 
-        result["uncovered_summary"] = uncovered_summary
+        warnings = []
+        if raw_count and float(effective_count / raw_count) < 0.60:
+            warnings.append("有效目标比例过低，需要人工复核禁飞区、候选生成或点云建模逻辑")
+
+        result["uncovered_summary"] = uncovered_effective_summary
+        result["uncovered_effective_summary"] = uncovered_effective_summary
+        result["uncovered_raw_summary"] = uncovered_raw_summary
+        result["unobservable_summary"] = unobservable_summary
         result["uncovered_voxels"] = uncovered_voxels[:400]
+        result["warnings"] = warnings
         return result
 
     def attention_coverage_from_mask(self, covered_mask: Sequence[bool]) -> Dict[str, object]:
@@ -4353,15 +5195,31 @@ class PlanningEnvironment:
 
 
 def coverage_thresholds_met(metrics: Dict[str, object]) -> bool:
-    for key, threshold in COVERAGE_THRESHOLDS.items():
+    return coverage_thresholds_met_for(metrics, COVERAGE_THRESHOLDS)
+
+
+def coverage_thresholds_met_for(metrics: Dict[str, object], thresholds: Mapping[str, float]) -> bool:
+    effective_key_map = {
+        "C_geo": "C_geo_effective",
+        "C_weighted": "C_weighted_effective",
+        "C_ins": "C_ins_effective",
+        "C_top": "C_top_effective",
+        "C_edge": "C_edge_effective",
+        "C_body": "C_body_effective",
+    }
+    for key, threshold in thresholds.items():
         if key == "C_body":
             continue
-        value = metrics.get(key)
+        value = metrics.get(effective_key_map.get(key, key), metrics.get(key))
         if value is None:
             return False
         if float(value) + 1e-9 < threshold:
             return False
     return True
+
+
+def compact_coverage_thresholds_met(metrics: Dict[str, object]) -> bool:
+    return coverage_thresholds_met_for(metrics, COMPACT_COVERAGE_THRESHOLDS)
 
 
 class VisibilityEngine:
@@ -4372,20 +5230,18 @@ class VisibilityEngine:
 
     def candidate_visible_indices(self, candidate: CandidateViewpoint) -> np.ndarray:
         if candidate.id not in self.cache:
-            skip_res = (
-                getattr(candidate, "aim_type", None) == "tower_overview"
-                or getattr(candidate, "action_name", "photo") == "none"
-            )
-            self.cache[candidate.id] = self.visible_indices_for_view(
-                position=candidate.position,
-                pitch=candidate.pitch,
-                yaw=candidate.yaw,
-                focal_level=candidate.focal_level,
-                f_eq_mm=candidate.f_eq_mm,
-                hfov_deg=candidate.hfov_deg,
-                vfov_deg=candidate.vfov_deg,
-                skip_resolution_check=skip_res,
-            )
+            if str(getattr(candidate, "action_name", "photo") or "photo").lower() != "photo":
+                self.cache[candidate.id] = np.array([], dtype=int)
+            else:
+                self.cache[candidate.id] = self.visible_indices_for_view(
+                    position=candidate.position,
+                    pitch=candidate.pitch,
+                    yaw=candidate.yaw,
+                    focal_level=candidate.focal_level,
+                    f_eq_mm=candidate.f_eq_mm,
+                    hfov_deg=candidate.hfov_deg,
+                    vfov_deg=candidate.vfov_deg,
+                )
         return self.cache[candidate.id]
 
     def candidate_visible_attention_indices(self, candidate: CandidateViewpoint) -> np.ndarray:
@@ -4581,7 +5437,8 @@ def evaluate_waypoint_coverage(waypoints: Sequence[Dict[str, object]], voxel_pat
                 indices = engine.visible_indices_for_view(position, pitch, yaw, focal_level=key)
                 if len(indices) == 0:
                     continue
-                new_indices = indices[~covered_mask[indices]]
+                effective_indices = indices[env.effective_target_mask[indices]]
+                new_indices = effective_indices[~covered_mask[effective_indices]]
                 gain = float(np.sum(env.weights[new_indices])) if len(new_indices) else 0.0
                 if gain > best_gain:
                     best_gain = gain
