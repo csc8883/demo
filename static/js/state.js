@@ -1,6 +1,14 @@
 export const state = {
     user: null, // { name: 'xxx', role: 'admin'/'user' }
     globalOffset: null,
+    activeScene: null,
+    activeStep: 'data',
+    activeSelection: null,
+    activeInspectorTab: 'current',
+    taskHistory: [],
+    operationLog: [],
+    lastSafetyResult: null,
+    compareVisible: false,
 
     // Track loaded assets for the new "Active Layers" feature
     loadedAssets: {
@@ -29,5 +37,13 @@ export function resetCoordinateCenter() {
 export function resetState() {
     state.user = null;
     state.globalOffset = null;
+    state.activeScene = null;
+    state.activeStep = 'data';
+    state.activeSelection = null;
+    state.activeInspectorTab = 'current';
+    state.taskHistory = [];
+    state.operationLog = [];
+    state.lastSafetyResult = null;
+    state.compareVisible = false;
     state.loadedAssets = { pointcloud: [], route: [], voxel: [] };
 }

@@ -12,8 +12,8 @@
     <!-- Chart.js for Admin Dashboard -->
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="/static/css/tailwind-fallback.css?v=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=2.3">
-    <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.0" />
+    <link rel="stylesheet" href="/static/css/style.css?v=2.4">
+    <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.6" />
     <style>
         .status-light { width: 6px; height: 20px; background: #cbd5e1; transition: all 0.3s; border-radius: 4px; }
         .active { background-color: #22c55e !important; box-shadow: 0 0 10px #22c55e; }
@@ -135,6 +135,38 @@
                 </div>
 
                 <div class="relative">
+                    <button class="nav-btn px-4 py-2 bg-slate-100 hover:bg-white hover:shadow border rounded-lg flex gap-2 items-center transition font-medium text-slate-700" onclick="openAlgorithmMenu()">
+                        <i class="ph-bold ph-map-pin-line text-green-600"></i> 航点管理
+                    </button>
+                    <div id="dd-calc" class="dropdown-menu hidden absolute top-full left-0 mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-80 p-3 z-50">
+                        <button onclick="ui.modals.openUpload('waypoint')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">导入航点</button>
+                        <button onclick="ui.modals.openList('waypoint', 'handleFileSelect')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">加载规划航点</button>
+                        <div class="px-2 py-2">
+                            <label class="text-[11px] text-slate-500 font-bold block mb-1">选择算法</label>
+                            <select id="planner-select" class="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white">
+                                <option value="语义加权贪心多焦段视点规划">语义加权贪心多焦段视点规划</option>
+                                <option value="单层强化学习多约束视点规划">单层强化学习多约束视点规划</option>
+                                <option value="语义表面体素分层强化学习多焦段视点规划">语义表面体素分层强化学习多焦段视点规划</option>
+                            </select>
+                        </div>
+                        <div class="px-2 py-2 border-t border-slate-100">
+                            <div class="text-[11px] text-slate-500 font-bold mb-2">可调参数</div>
+                            <div id="planner-config-container" class="grid grid-cols-1 gap-2"></div>
+                        </div>
+                        <div class="px-2 py-2 border-t border-slate-100">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-[11px] text-slate-500 font-bold">规划点云</span>
+                                <button onclick="renderPlanningPointCloudPicker()" class="text-[11px] text-green-700 font-bold hover:underline">刷新</button>
+                            </div>
+                            <div id="planning-pointcloud-list" class="max-h-36 overflow-auto rounded-lg border border-slate-100 bg-slate-50 p-1"></div>
+                        </div>
+                        <button onclick="runRL()" class="mt-2 block w-full text-left p-2.5 hover:bg-green-50 rounded-lg transition flex justify-between text-green-700 font-bold">
+                            生成航点 <i class="ph-bold ph-brain text-green-500"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="relative">
                     <button class="nav-btn px-4 py-2 bg-slate-100 hover:bg-white hover:shadow border rounded-lg flex gap-2 items-center transition font-medium text-slate-700" onclick="ui.dropdown.toggle('dd-manual')">
                         <i class="ph-bold ph-pen-nib text-purple-600"></i> 航线管理
                     </button>
@@ -164,63 +196,20 @@
                         </div>
                     </div>
                 </div>
-
-                <div class="relative">
-                    <button class="nav-btn px-4 py-2 bg-slate-100 hover:bg-white hover:shadow border rounded-lg flex gap-2 items-center transition font-medium text-slate-700" onclick="openAlgorithmMenu()">
-                        <i class="ph-bold ph-map-pin-line text-green-600"></i> 航点管理
-                    </button>
-                    <div id="dd-calc" class="dropdown-menu hidden absolute top-full left-0 mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-80 p-3 z-50">
-                        <button onclick="ui.modals.openUpload('waypoint')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">导入航点</button>
-                        <button onclick="ui.modals.openList('waypoint', 'handleFileSelect')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">加载规划航点</button>
-                        <div class="px-2 py-2">
-                            <label class="text-[11px] text-slate-500 font-bold block mb-1">选择算法</label>
-                            <select id="planner-select" class="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white">
-                                <option value="语义加权贪心多焦段视点规划">语义加权贪心多焦段视点规划</option>
-                                <option value="单层强化学习多约束视点规划">单层强化学习多约束视点规划</option>
-                                <option value="语义表面体素分层强化学习多焦段视点规划">语义表面体素分层强化学习多焦段视点规划</option>
-                            </select>
-                        </div>
-                        <div class="px-2 py-2 border-t border-slate-100">
-                            <div class="text-[11px] text-slate-500 font-bold mb-2">可调参数</div>
-                            <div id="planner-config-container" class="grid grid-cols-1 gap-2"></div>
-                        </div>
-                        <div class="px-2 py-2 border-t border-slate-100">
-                            <div class="flex items-center justify-between mb-2">
-                                <span class="text-[11px] text-slate-500 font-bold">规划点云</span>
-                                <button onclick="renderPlanningPointCloudPicker()" class="text-[11px] text-green-700 font-bold hover:underline">刷新</button>
-                            </div>
-                            <div id="planning-pointcloud-list" class="max-h-36 overflow-auto rounded-lg border border-slate-100 bg-slate-50 p-1"></div>
-                        </div>
-                        <button onclick="runRL()" class="mt-2 block w-full text-left p-2.5 hover:bg-green-50 rounded-lg transition flex justify-between text-green-700 font-bold">
-                            开始规划 <i class="ph-bold ph-brain text-green-500"></i>
-                        </button>
-                    </div>
-                </div>
                 <div class="relative">
                     <button class="nav-btn px-4 py-2 bg-slate-100 hover:bg-white hover:shadow border rounded-lg flex gap-2 items-center transition font-medium text-slate-700" onclick="openComparePage()">
                         <i class="ph-bold ph-chart-bar text-orange-600"></i> 多算法对比
                     </button>
                 </div>
 
-                <!-- Layer Management (Dynamic) -->
-                <div class="relative">
-                    <button class="nav-btn px-4 py-2 bg-white border-2 border-blue-100 text-blue-700 rounded-lg flex gap-2 items-center transition font-bold" onclick="ui.dropdown.toggle('dd-layers')">
-                        <i class="ph-bold ph-layers"></i> 图层管理
-                        <span id="layer-count" class="bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-full hidden">0</span>
-                    </button>
-                    <!-- This div is populated by JS -->
-                    <div id="dd-layers" class="dropdown-menu hidden absolute right-0 top-full mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-64 p-3 z-50 space-y-2">
-                        <div class="text-xs font-bold text-slate-400 tracking-wider mb-2">当前图层</div>
-                        <div id="layer-list-container" class="space-y-1">
-                            <div class="text-xs text-slate-400 text-center py-2 italic">暂无加载图层</div>
-                        </div>
-                    </div>
-                </div>
-
             </div>
 
             <div class="flex items-center gap-4">
-                <button onclick="ui.sidebar.toggle()" class="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition" title="切换侧边栏">
+                <button onclick="ui.taskCenter.toggle()" class="nav-btn px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg flex gap-2 items-center transition font-bold" title="任务中心">
+                    <i class="ph-bold ph-list-checks text-blue-600"></i> 任务中心
+                    <span id="task-count" class="bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-full hidden">0</span>
+                </button>
+                <button onclick="ui.sidebar.toggle()" class="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition" title="切换检查器">
                     <i class="ph-bold ph-sidebar-simple text-xl"></i>
                 </button>
                 <div class="h-6 w-px bg-slate-200"></div>
@@ -244,20 +233,95 @@
             </div>
         </nav>
 
+        <section id="workflow-bar" class="workflow-bar shrink-0">
+            <button class="workflow-step active" data-step="data" onclick="setWorkflowStep('data')">
+                <span>1</span><strong>项目/数据</strong><small>导入点云与人工航线</small>
+            </button>
+            <button class="workflow-step" data-step="model" onclick="setWorkflowStep('model')">
+                <span>2</span><strong>点云建模</strong><small>体素化与语义目标</small>
+            </button>
+            <button class="workflow-step" data-step="candidate" onclick="setWorkflowStep('candidate')">
+                <span>3</span><strong>候选视点</strong><small>候选点与可视性</small>
+            </button>
+            <button class="workflow-step" data-step="waypoint" onclick="setWorkflowStep('waypoint')">
+                <span>4</span><strong>航点规划</strong><small>贪心/RL/分层RL</small>
+            </button>
+            <button class="workflow-step" data-step="route" onclick="setWorkflowStep('route')">
+                <span>5</span><strong>航线生成</strong><small>A*避障与进出塔</small>
+            </button>
+            <button class="workflow-step" data-step="safety" onclick="setWorkflowStep('safety')">
+                <span>6</span><strong>安全校验</strong><small>杆塔/导线/禁飞体</small>
+            </button>
+            <button class="workflow-step" data-step="export" onclick="setWorkflowStep('export')">
+                <span>7</span><strong>导出归档</strong><small>航线与参数快照</small>
+            </button>
+        </section>
+
         <div class="flex-1 flex overflow-hidden relative">
+            <aside id="layer-tree-panel" class="workspace-panel layer-tree-panel">
+                <div class="panel-title">
+                    <div>
+                        <p>PROJECT LAYERS</p>
+                        <h2>图层树</h2>
+                    </div>
+                    <span id="layer-count" class="panel-count hidden">0</span>
+                </div>
+                <div class="layer-tree-actions">
+                    <button onclick="ui.modals.openList('point_cloud', 'handleFileSelect')" title="加载点云"><i class="ph-bold ph-cloud"></i></button>
+                    <button onclick="ui.modals.openList('manual_route', 'handleFileSelect')" title="加载人工航线"><i class="ph-bold ph-path"></i></button>
+                    <button onclick="renderPlanningPointCloudPicker()" title="刷新规划点云"><i class="ph-bold ph-arrows-clockwise"></i></button>
+                </div>
+                <div id="layer-list-container" class="layer-tree-list">
+                    <div class="empty-layer-state">暂无加载图层</div>
+                </div>
+                <div id="workflow-readiness" class="readiness-card">
+                    <div class="readiness-row"><span>点云</span><strong id="ready-pointcloud">未加载</strong></div>
+                    <div class="readiness-row"><span>体素</span><strong id="ready-voxel">未生成</strong></div>
+                    <div class="readiness-row"><span>航点/航线</span><strong id="ready-route">未加载</strong></div>
+                </div>
+            </aside>
             <!-- Collapsible Sidebar -->
-            <aside id="sidebar-panel" class="w-80 bg-white border-r flex flex-col z-10 shadow-lg relative collapsed">
+            <aside id="sidebar-panel" class="workspace-panel inspector-panel w-96 bg-white border-l flex flex-col z-10 shadow-lg relative">
                 <div class="p-4 border-b bg-slate-50 text-slate-600 flex justify-between items-center shrink-0">
-                    <span class="font-bold text-sm flex items-center gap-2">
-                        <i class="ph-bold ph-list-numbers text-blue-600"></i> 航点详情
-                    </span>
+                    <div>
+                        <p class="text-[10px] font-bold text-slate-400">INSPECTOR</p>
+                        <span class="font-bold text-sm flex items-center gap-2">
+                            <i class="ph-bold ph-sliders-horizontal text-blue-600"></i> 对象检查器
+                        </span>
+                    </div>
                     <button onclick="ui.sidebar.toggle()" class="hover:bg-slate-200 p-1 rounded transition"><i class="ph-bold ph-caret-left"></i></button>
                 </div>
-                <!-- Waypoint List -->
-                <div id="waypoint-list" class="flex-1 overflow-y-auto custom-scrollbar bg-white">
-                    <div class="p-10 text-center text-slate-400 text-sm flex flex-col items-center justify-center h-full">
-                        <i class="ph-duotone ph-map-trifold text-4xl mb-3 text-slate-300"></i>
-                        <p>选择或计算航线以查看详情</p>
+                <div class="inspector-tabs">
+                    <button class="active" data-tab="current" onclick="ui.inspector.setTab('current')">当前对象</button>
+                    <button data-tab="metrics" onclick="ui.inspector.setTab('metrics')">指标</button>
+                    <button data-tab="safety" onclick="ui.inspector.setTab('safety')">安全</button>
+                    <button data-tab="log" onclick="ui.inspector.setTab('log')">日志</button>
+                </div>
+                <div id="inspector-current" class="inspector-tab-panel flex-1 overflow-y-auto custom-scrollbar bg-white">
+                    <div id="selection-card" class="selection-card">
+                        <i class="ph-duotone ph-cube-focus text-3xl text-slate-300"></i>
+                        <div>
+                            <h3>尚未选择对象</h3>
+                            <p>加载点云、体素或航线后，点击图层或航点查看详情。</p>
+                        </div>
+                    </div>
+                    <div class="inspector-subtitle">航点序列</div>
+                    <div id="waypoint-list" class="waypoint-list-embedded">
+                        <div class="p-8 text-center text-slate-400 text-sm">
+                            <i class="ph-duotone ph-map-trifold text-4xl mb-3 text-slate-300"></i>
+                            <p>选择或计算航线以查看详情</p>
+                        </div>
+                    </div>
+                </div>
+                <div id="inspector-metrics" class="inspector-tab-panel hidden flex-1 overflow-y-auto custom-scrollbar bg-white">
+                    <div id="metrics-panel" class="inspector-empty">加载算法航点或完成对比后显示覆盖率、航点数和拍摄效率。</div>
+                </div>
+                <div id="inspector-safety" class="inspector-tab-panel hidden flex-1 overflow-y-auto custom-scrollbar bg-white">
+                    <div id="safety-panel" class="inspector-empty">完成安全距离校验后显示违规统计与前几条风险位置。</div>
+                </div>
+                <div id="inspector-log" class="inspector-tab-panel hidden flex-1 overflow-y-auto custom-scrollbar bg-white">
+                    <div id="operation-log" class="operation-log">
+                        <div class="inspector-empty">任务、加载、校验和导出记录会显示在这里。</div>
                     </div>
                 </div>
             </aside>
@@ -270,6 +334,19 @@
                         <strong>点云 / 体素 / 航点协同显示</strong>
                     </div>
                     <span>拖拽旋转 · 滚轮缩放 · 点击航点定位</span>
+                </div>
+                <div class="scene-toolbar">
+                    <button onclick="resetSceneView()" title="复位视角"><i class="ph-bold ph-crosshair"></i></button>
+                    <button onclick="setScenePointSize(0.75)" title="点更细"><i class="ph-bold ph-minus"></i></button>
+                    <button onclick="setScenePointSize(1.25)" title="点更粗"><i class="ph-bold ph-plus"></i></button>
+                    <button onclick="setSceneOpacity(0.55)" title="半透明显示"><i class="ph-bold ph-eye"></i></button>
+                    <button onclick="setSceneOpacity(1)" title="恢复不透明"><i class="ph-bold ph-eye-slash"></i></button>
+                </div>
+                <div class="semantic-legend">
+                    <span><i class="legend-dot tower"></i>塔身</span>
+                    <span><i class="legend-dot insulator"></i>绝缘子</span>
+                    <span><i class="legend-dot wire"></i>导/地线</span>
+                    <span><i class="legend-dot route"></i>航线/航点</span>
                 </div>
                 <div class="viewport-radar pointer-events-none" aria-hidden="true">
                     <span></span>
@@ -292,7 +369,7 @@
                 </button>
             </main>
 
-            <section id="compare-page" class="hidden flex-1 overflow-y-auto bg-white/75 backdrop-blur-sm">
+            <section id="compare-page" class="hidden compare-drawer overflow-y-auto bg-white/90 backdrop-blur-sm">
                 <div class="p-6 space-y-5">
                     <div class="flex items-center justify-between gap-4">
                         <div>
@@ -381,6 +458,20 @@
                 <span class="text-[10px] font-bold text-slate-500">航线</span>
             </div>
         </div>
+
+        <section id="task-center-panel" class="task-center-panel hidden">
+            <div class="task-center-head">
+                <div>
+                    <p>TASK CENTER</p>
+                    <h3>任务中心</h3>
+                </div>
+                <button onclick="ui.taskCenter.toggle(false)" title="关闭"><i class="ph-bold ph-x"></i></button>
+            </div>
+            <div id="task-list" class="task-list">
+                <div class="task-empty">暂无任务记录</div>
+            </div>
+        </section>
+        <div id="toast-stack" class="toast-stack"></div>
     </div>
 
     <!-- 3. Admin Dashboard -->
@@ -568,7 +659,7 @@
         }
     </script>
 
-    <script type="module" src="/static/js/app.js?v=3.5"></script>
+    <script type="module" src="/static/js/app.js?v=3.6"></script>
 </body>
 </html>
 

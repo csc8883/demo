@@ -1,11 +1,21 @@
-import * as API from './api.js?v=3.3';
-import { state, resetCoordinateCenter } from './state.js?v=3.3';
-import * as Scene from './scene.js?v=3.3';
+import * as API from './api.js?v=3.6';
+import { state, resetCoordinateCenter } from './state.js?v=3.6';
+import * as Scene from './scene.js?v=3.6';
 
 const $ = (id) => document.getElementById(id);
 const routeDomKey = (filename) => encodeURIComponent(String(filename ?? ''));
 const waypointItemId = (filename, waypointId) => `wp-item-${routeDomKey(filename)}-${waypointId}`;
 const waypointDetailId = (filename, waypointId) => `wp-detail-${routeDomKey(filename)}-${waypointId}`;
+const shortTime = (ts = Date.now()) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const stepOrder = ['data', 'model', 'candidate', 'waypoint', 'route', 'safety', 'export'];
+
+function assetMeta(cat) {
+    const key = `${cat || ''}`;
+    if (key === 'pointcloud') return { title: '点云', icon: 'ph-cloud', tone: 'text-blue-600' };
+    if (key === 'voxel') return { title: '体素/候选点', icon: 'ph-cube', tone: 'text-orange-600' };
+    if (key === 'route') return { title: '航点/航线', icon: 'ph-path', tone: 'text-purple-600' };
+    return { title: key || '图层', icon: 'ph-layers', tone: 'text-slate-500' };
+}
 
 export const ui = {
     // --- 新增: 加载遮罩 (修复报错的关键) ---
@@ -46,14 +56,240 @@ export const ui = {
         }
     },
 
+    toast: {
+        show(title, message = '', type = 'info', timeout = 3600) {
+            const stack = $('toast-stack');
+            if(!stack) return;
+            const icon = type === 'success' ? 'ph-check-circle'
+                : type === 'error' ? 'ph-warning-circle'
+                : type === 'warning' ? 'ph-warning'
+                : 'ph-info';
+            const item = document.createElement('div');
+            item.className = `toast-item toast-${type}`;
+            item.innerHTML = `
+                <i class="ph-bold ${icon}"></i>
+                <div><strong>${title}</strong>${message ? `<span>${message}</span>` : ''}</div>
+            `;
+            stack.appendChild(item);
+            setTimeout(() => {
+                item.style.opacity = '0';
+                item.style.transform = 'translateY(8px)';
+                setTimeout(() => item.remove(), 180);
+            }, timeout);
+        }
+    },
+
+    log: {
+        add(title, detail = '', level = 'info') {
+            const entry = { title, detail, level, ts: Date.now() };
+            state.operationLog.unshift(entry);
+            state.operationLog = state.operationLog.slice(0, 80);
+            ui.inspector.renderLog();
+        }
+    },
+
+    taskCenter: {
+        visible: false,
+        toggle(force) {
+            const panel = $('task-center-panel');
+            if(!panel) return;
+            this.visible = typeof force === 'boolean' ? force : panel.classList.contains('hidden');
+            panel.classList.toggle('hidden', !this.visible);
+            this.render();
+        },
+        add({ title, detail = '', type = 'operation' }) {
+            const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            state.taskHistory.unshift({
+                id, title, detail, type,
+                progress: 0,
+                status: 'running',
+                startedAt: Date.now(),
+                updatedAt: Date.now()
+            });
+            state.taskHistory = state.taskHistory.slice(0, 40);
+            this.render();
+            ui.log.add(title, detail, 'running');
+            return id;
+        },
+        update(id, patch = {}) {
+            const task = state.taskHistory.find((item) => item.id === id);
+            if(!task) return;
+            Object.assign(task, patch, { updatedAt: Date.now() });
+            this.render();
+            if(patch.status === 'success') ui.log.add(task.title, patch.detail || task.detail || '任务完成', 'success');
+            if(patch.status === 'error') ui.log.add(task.title, patch.detail || task.detail || '任务失败', 'error');
+        },
+        render() {
+            const list = $('task-list');
+            const count = $('task-count');
+            if(count) {
+                count.textContent = state.taskHistory.length;
+                count.classList.toggle('hidden', state.taskHistory.length === 0);
+            }
+            if(!list) return;
+            if(!state.taskHistory.length) {
+                list.innerHTML = '<div class="task-empty">暂无任务记录</div>';
+                return;
+            }
+            list.innerHTML = state.taskHistory.map((task) => {
+                const stateClass = task.status === 'success' ? 'task-state-success'
+                    : task.status === 'error' ? 'task-state-error'
+                    : 'task-state-running';
+                const statusText = task.status === 'success' ? '完成'
+                    : task.status === 'error' ? '失败'
+                    : '执行中';
+                const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+                return `
+                    <div class="task-item">
+                        <div class="task-item-head">
+                            <span>${task.title}</span>
+                            <span class="${stateClass}">${statusText}</span>
+                        </div>
+                        <p>${task.detail || ''}</p>
+                        <p>${shortTime(task.startedAt)} · ${task.type || 'operation'}</p>
+                        <div class="task-progress"><span style="width:${progress}%"></span></div>
+                    </div>
+                `;
+            }).join('');
+        }
+    },
+
+    workflow: {
+        setStep(step) {
+            state.activeStep = stepOrder.includes(step) ? step : 'data';
+            this.render();
+        },
+        render() {
+            document.querySelectorAll('.workflow-step').forEach((btn) => {
+                const step = btn.dataset.step;
+                btn.classList.toggle('active', step === state.activeStep);
+            });
+            const pcReady = (state.loadedAssets.pointcloud || []).length > 0;
+            const voxReady = (state.loadedAssets.voxel || []).length > 0;
+            const routeReady = (state.loadedAssets.route || []).length > 0;
+            const readyMap = { data: pcReady, model: voxReady, candidate: voxReady, waypoint: routeReady, route: routeReady, safety: !!state.lastSafetyResult, export: routeReady };
+            document.querySelectorAll('.workflow-step').forEach((btn) => {
+                const step = btn.dataset.step;
+                btn.classList.toggle('ready', !!readyMap[step]);
+            });
+            const pc = $('ready-pointcloud');
+            const vox = $('ready-voxel');
+            const route = $('ready-route');
+            if(pc) pc.textContent = pcReady ? `${state.loadedAssets.pointcloud.length} 个` : '未加载';
+            if(vox) vox.textContent = voxReady ? `${state.loadedAssets.voxel.length} 个` : '未生成';
+            if(route) route.textContent = routeReady ? `${state.loadedAssets.route.length} 条` : '未加载';
+        }
+    },
+
+    inspector: {
+        setTab(tab) {
+            state.activeInspectorTab = tab || 'current';
+            document.querySelectorAll('.inspector-tabs button').forEach((btn) => {
+                btn.classList.toggle('active', btn.dataset.tab === state.activeInspectorTab);
+            });
+            document.querySelectorAll('.inspector-tab-panel').forEach((panel) => {
+                panel.classList.toggle('hidden', panel.id !== `inspector-${state.activeInspectorTab}`);
+            });
+        },
+        select(selection = {}) {
+            state.activeSelection = selection;
+            this.renderSelection();
+            if(selection.tab) this.setTab(selection.tab);
+        },
+        renderSelection() {
+            const card = $('selection-card');
+            if(!card) return;
+            const s = state.activeSelection;
+            if(!s) {
+                card.innerHTML = '<i class="ph-duotone ph-cube-focus text-3xl text-slate-300"></i><div><h3>尚未选择对象</h3><p>加载点云、体素或航线后，点击图层或航点查看详情。</p></div>';
+                return;
+            }
+            const icon = s.icon || assetMeta(s.category).icon;
+            const fields = s.fields || {};
+            const fieldHtml = Object.entries(fields).map(([key, value]) => `
+                <div><span>${key}</span><strong title="${value ?? '--'}">${value ?? '--'}</strong></div>
+            `).join('');
+            card.innerHTML = `
+                <i class="ph-bold ${icon} text-3xl text-blue-600"></i>
+                <div class="min-w-0">
+                    <h3>${s.title || '当前对象'}</h3>
+                    <p>${s.description || ''}</p>
+                    ${fieldHtml ? `<div class="selection-meta-grid">${fieldHtml}</div>` : ''}
+                </div>
+            `;
+        },
+        renderMetrics(stats = null) {
+            const panel = $('metrics-panel');
+            if(!panel) return;
+            const s = stats || state.activeSelection?.stats;
+            if(!s) {
+                panel.innerHTML = '<div class="inspector-empty">加载算法航点或完成对比后显示覆盖率、航点数和拍摄效率。</div>';
+                return;
+            }
+            const pct = (value) => value === null || value === undefined || Number.isNaN(Number(value)) ? '--' : `${(Number(value) * 100).toFixed(1)}%`;
+            const val = (...keys) => {
+                for(const key of keys) if(s[key] !== undefined && s[key] !== null) return s[key];
+                return null;
+            };
+            panel.innerHTML = `
+                <div class="metric-grid">
+                    <div class="metric-card"><span>加权覆盖</span><strong>${pct(val('coverage', 'coverage_weighted', 'C_weighted'))}</strong></div>
+                    <div class="metric-card"><span>绝缘子覆盖</span><strong>${pct(val('coverage_insulator', 'C_ins'))}</strong></div>
+                    <div class="metric-card"><span>塔顶覆盖</span><strong>${pct(val('C_top'))}</strong></div>
+                    <div class="metric-card"><span>边缘覆盖</span><strong>${pct(val('C_edge'))}</strong></div>
+                    <div class="metric-card"><span>航点数</span><strong>${val('waypoint_count', 'count') ?? '--'}</strong></div>
+                    <div class="metric-card"><span>拍摄数</span><strong>${val('shot_count') ?? '--'}</strong></div>
+                </div>
+            `;
+        },
+        renderSafety(result = null) {
+            const panel = $('safety-panel');
+            if(!panel) return;
+            const data = result || state.lastSafetyResult;
+            if(!data) {
+                panel.innerHTML = '<div class="inspector-empty">完成安全距离校验后显示违规统计与前几条风险位置。</div>';
+                return;
+            }
+            const status = data.passed ? '通过' : '未通过';
+            const violations = (data.violations || []).slice(0, 8).map((v) => {
+                const target = v.target === 'wire' ? '导线' : (v.target === 'conductor_no_fly' ? '导线禁飞体' : '杆塔');
+                const where = v.type === 'segment' ? `${v.from}-${v.to} 段` : `${v.index} 号点`;
+                return `<div class="violation-item">${where} 距${target} ${v.distance_m} m，阈值 ${v.threshold_m ?? '--'} m</div>`;
+            }).join('');
+            panel.innerHTML = `
+                <div class="safety-summary">
+                    <h4>校验结果：${status}</h4>
+                    <p>文件：${data.filename || '--'}<br>杆塔最小距离：${data.min_tower_distance_m ?? '--'} m；导线最小距离：${data.min_wire_distance_m ?? '--'} m。<br>违规数量：${data.violation_count || 0}，任务点 ${data.task_violation_count || 0}，辅助点 ${data.auxiliary_violation_count || 0}，航段 ${data.segment_violation_count || 0}。</p>
+                </div>
+                <div class="violation-list">${violations || '<div class="inspector-empty">未返回违规条目。</div>'}</div>
+            `;
+        },
+        renderLog() {
+            const log = $('operation-log');
+            if(!log) return;
+            if(!state.operationLog.length) {
+                log.innerHTML = '<div class="inspector-empty">任务、加载、校验和导出记录会显示在这里。</div>';
+                return;
+            }
+            log.innerHTML = state.operationLog.map((item) => `
+                <div class="log-item">
+                    <strong>${item.title}</strong>
+                    <span>${shortTime(item.ts)} · ${item.detail || ''}</span>
+                </div>
+            `).join('');
+        }
+    },
+
     // --- 新增: 进度条控制 ---
     progress: {
         timer: null,
-        async start(task, onComplete) {
+        async start(task, onComplete, meta = {}) {
             const modal = $('progress-modal');
             const bar = $('prog-bar');
             const text = $('prog-text');
             const name = $('prog-task-name');
+            const title = meta.title || (task === 'voxelize' ? '点云体素化' : '航点规划');
+            const taskId = ui.taskCenter.add({ title, detail: meta.detail || '', type: task });
 
             if(modal) modal.classList.remove('hidden');
             if(name) name.innerText = task === 'voxelize' ? '体素化处理中...' : '路径规划中...';
@@ -74,12 +310,14 @@ export const ui = {
                                     const p = info.progress;
                                     if(bar) bar.style.width = `${p}%`;
                                     if(text) text.innerText = `${p}%`;
+                                    ui.taskCenter.update(taskId, { progress: p, detail: info.message || meta.detail || '' });
 
                                     if(info.status === 'error') {
                                         clearInterval(this.timer);
                                         if(modal) modal.classList.add('hidden');
                                         const err = new Error(info.message || '任务执行失败');
-                                        alert(err.message);
+                                        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: err.message });
+                                        ui.toast.show(title, err.message, 'error');
                                         reject(err);
                                         return;
                                     }
@@ -90,8 +328,11 @@ export const ui = {
                                             try {
                                                 if(modal) modal.classList.add('hidden');
                                                 if(onComplete) await onComplete();
+                                                ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: meta.success || '任务完成' });
+                                                ui.toast.show(title, meta.success || '任务完成', 'success');
                                                 resolve();
                                             } catch (e) {
+                                                ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
                                                 reject(e);
                                             }
                                         }, 500);
@@ -104,6 +345,7 @@ export const ui = {
                             clearInterval(this.timer);
                             if(modal) modal.classList.add('hidden');
                             if(onComplete) await onComplete();
+                            ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: meta.success || '任务完成' });
                             resolve();
                         }
                     } catch(e) {
@@ -325,7 +567,7 @@ export const ui = {
 
     layers: {
         normalizeCategory(cat) {
-            if (cat === 'manual_route' || cat === 'waypoint') return 'route';
+            if (cat === 'manual_route' || cat === 'algorithm_route' || cat === 'waypoint') return 'route';
             if (cat === 'point_cloud') return 'pointcloud';
             return cat;
         },
@@ -345,53 +587,86 @@ export const ui = {
                 counter.classList.toggle('hidden', allAssets.length === 0);
             }
 
+            ui.workflow.render();
             if(!c) return;
 
             if (allAssets.length === 0) {
-                c.innerHTML = '<div class="text-xs text-slate-400 text-center py-2 italic">暂无加载图层</div>';
+                c.innerHTML = '<div class="empty-layer-state">暂无加载图层</div>';
                 return;
             }
 
             c.innerHTML = '';
-            allAssets.forEach(asset => {
-                const div = document.createElement('div');
-                div.className = 'layer-item flex items-center justify-between p-2 rounded';
+            const grouped = {
+                pointcloud: allAssets.filter((asset) => asset.cat === 'pointcloud'),
+                voxel: allAssets.filter((asset) => asset.cat === 'voxel'),
+                route: allAssets.filter((asset) => asset.cat === 'route')
+            };
+            Object.entries(grouped).forEach(([cat, assets]) => {
+                if(!assets.length) return;
+                const meta = assetMeta(cat);
+                const groupTitle = document.createElement('div');
+                groupTitle.className = 'layer-group-title';
+                groupTitle.textContent = `${meta.title} (${assets.length})`;
+                c.appendChild(groupTitle);
 
-                let icon = 'ph-cube';
-                if(asset.cat === 'pointcloud') icon = 'ph-cloud';
-                if(asset.cat === 'route') icon = 'ph-path';
+                assets.forEach(asset => {
+                    const div = document.createElement('div');
+                    div.className = 'layer-item';
 
-                const checked = asset.visible !== false;
-                const title = asset.label || asset.id;
-                const left = document.createElement('div');
-                left.className = 'flex items-center gap-2 overflow-hidden';
+                    const checked = asset.visible !== false;
+                    const title = asset.label || asset.id;
+                    const main = document.createElement('div');
+                    main.className = 'layer-item-main';
 
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.checked = checked;
-                checkbox.className = 'accent-blue-600 cursor-pointer';
-                checkbox.addEventListener('change', () => window.toggleLayer(asset.cat, asset.id, checkbox));
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = checked;
+                    checkbox.className = 'accent-blue-600 cursor-pointer';
+                    checkbox.addEventListener('change', () => window.toggleLayer(asset.cat, asset.id, checkbox));
 
-                const iconEl = document.createElement('i');
-                iconEl.className = `ph-bold ${icon} text-slate-400`;
+                    const iconEl = document.createElement('i');
+                    iconEl.className = `ph-bold ${meta.icon} ${meta.tone}`;
 
-                const titleEl = document.createElement('span');
-                titleEl.className = 'text-sm truncate max-w-[120px]';
-                titleEl.title = title;
-                titleEl.textContent = title;
+                    const text = document.createElement('button');
+                    text.className = 'min-w-0 text-left';
+                    text.innerHTML = `<span class="layer-item-title" title="${title}">${title}</span><span class="layer-item-meta">${asset.methodName || asset.id}</span>`;
+                    text.addEventListener('click', () => {
+                        ui.inspector.select({
+                            category: asset.cat,
+                            title: title,
+                            description: asset.methodName || meta.title,
+                            icon: meta.icon,
+                            fields: {
+                                类型: meta.title,
+                                文件: asset.id,
+                                状态: checked ? '可见' : '隐藏'
+                            }
+                        });
+                        if(window.focusLayer) window.focusLayer(asset.cat, asset.id);
+                    });
 
-                left.appendChild(checkbox);
-                left.appendChild(iconEl);
-                left.appendChild(titleEl);
+                    main.appendChild(checkbox);
+                    main.appendChild(iconEl);
+                    main.appendChild(text);
 
-                const removeBtn = document.createElement('button');
-                removeBtn.className = 'text-slate-300 hover:text-red-500 transition';
-                removeBtn.innerHTML = '<i class="ph-bold ph-x"></i>';
-                removeBtn.addEventListener('click', () => window.removeLayer(asset.cat, asset.id));
+                    const actions = document.createElement('div');
+                    actions.className = 'layer-item-actions';
+                    const focusBtn = document.createElement('button');
+                    focusBtn.title = '聚焦图层';
+                    focusBtn.innerHTML = '<i class="ph-bold ph-crosshair"></i>';
+                    focusBtn.addEventListener('click', () => window.focusLayer && window.focusLayer(asset.cat, asset.id));
 
-                div.appendChild(left);
-                div.appendChild(removeBtn);
-                c.appendChild(div);
+                    const removeBtn = document.createElement('button');
+                    removeBtn.title = '移除图层';
+                    removeBtn.innerHTML = '<i class="ph-bold ph-x"></i>';
+                    removeBtn.addEventListener('click', () => window.removeLayer(asset.cat, asset.id));
+                    actions.appendChild(focusBtn);
+                    actions.appendChild(removeBtn);
+
+                    div.appendChild(main);
+                    div.appendChild(actions);
+                    c.appendChild(div);
+                });
             });
         },
 
@@ -419,11 +694,14 @@ export const ui = {
                 });
                 state.loadedAssets[key] = [];
             });
+            if(Scene.removeObject) Scene.removeObject('safety', 'latest');
             if (resetCenter) {
                 resetCoordinateCenter();
             }
+            state.lastSafetyResult = null;
             ui.sidebar.routeStore = {};
             ui.sidebar.renderAll();
+            ui.inspector.renderSafety();
             this.updateControl();
             if(typeof window.renderPlanningPointCloudPicker === 'function') {
                 window.renderPlanningPointCloudPicker();

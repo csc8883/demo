@@ -1,7 +1,7 @@
-import { state, resetState } from './state.js?v=3.3';
-import * as API from './api.js?v=3.3';
-import * as Scene from './scene.js?v=3.3';
-import { ui } from './ui.js?v=3.3';
+import { state, resetState } from './state.js?v=3.6';
+import * as API from './api.js?v=3.6';
+import * as Scene from './scene.js?v=3.6';
+import { ui } from './ui.js?v=3.6';
 
 console.log("App initializing...");
 
@@ -61,6 +61,11 @@ window.closeUserCenter = closeUserCenter;
 window.saveProfileChanges = saveProfileChanges;
 window.handleProfileSearch = handleProfileSearch;
 window.handleProfileDelete = handleProfileDelete;
+window.setWorkflowStep = setWorkflowStep;
+window.focusLayer = focusLayer;
+window.resetSceneView = resetSceneView;
+window.setScenePointSize = setScenePointSize;
+window.setSceneOpacity = setSceneOpacity;
 
 console.log("Global functions bound.");
 
@@ -130,6 +135,85 @@ function scrollToLogin() {
     modal.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
 }
 
+function notify(title, message = '', type = 'info') {
+    if(ui.toast?.show) ui.toast.show(title, message, type);
+    if(ui.log?.add) ui.log.add(title, message, type);
+}
+
+function openDropdown(id) {
+    document.querySelectorAll('.dropdown-menu').forEach((el) => {
+        el.classList.toggle('hidden', el.id !== id);
+    });
+}
+
+function openRouteSubPanel(panelId, loader) {
+    openDropdown('dd-manual');
+    const panel = document.getElementById(panelId);
+    if(panel?.classList.contains('hidden')) panel.classList.remove('hidden');
+    if(loader) loader();
+}
+
+function setWorkflowStep(step) {
+    ui.workflow.setStep(step);
+    const actionMap = {
+        data: () => ui.modals.openList('point_cloud', 'handleFileSelect'),
+        model: () => openDropdown('dd-pc'),
+        candidate: () => openAlgorithmMenu(),
+        waypoint: () => openAlgorithmMenu(),
+        route: () => openRouteSubPanel('route-plan-list-container', loadRoutePlanOptions),
+        safety: () => openRouteSubPanel('route-validation-list-container', loadRouteValidationOptions),
+        export: () => openRouteSubPanel('export-list-container', loadExportOptions)
+    };
+    if(actionMap[step]) actionMap[step]();
+}
+
+function focusLayer(cat, id) {
+    if(Scene.focusObject) Scene.focusObject(cat, id);
+}
+
+function resetSceneView() {
+    if(Scene.resetView) Scene.resetView();
+}
+
+function setScenePointSize(scale) {
+    if(Scene.setPointSizeScale) {
+        Scene.setPointSizeScale(scale);
+        notify('视窗显示已更新', `点大小倍率：${scale}`, 'info');
+    }
+}
+
+function setSceneOpacity(opacity) {
+    if(Scene.setGlobalOpacity) {
+        Scene.setGlobalOpacity(opacity);
+        notify('视窗显示已更新', `透明度：${opacity}`, 'info');
+    }
+}
+
+function updateReadiness() {
+    ui.workflow.render();
+}
+
+function selectAssetForInspector(category, filename, meta = {}) {
+    ui.inspector.select({
+        category,
+        title: meta.title || filename,
+        description: meta.description || meta.methodName || '',
+        icon: meta.icon,
+        fields: meta.fields || {
+            文件: filename,
+            类型: meta.typeLabel || category,
+            状态: meta.status || '已加载'
+        },
+        stats: meta.stats || null
+    });
+    if(meta.stats) ui.inspector.renderMetrics(meta.stats);
+}
+
+function showOperationResult(title, detail, type = 'success') {
+    notify(title, detail, type);
+    ui.taskCenter.render();
+}
+
 // --- 2. 初始化 3D 场景 ---
 const container = document.getElementById('canvas-container');
 if(container) {
@@ -171,7 +255,10 @@ async function handleAuth() {
             } else {
                 document.getElementById('user-app').classList.remove('hidden');
                 setCurrentUserDisplay(state.user.display_name || state.user.name);
-                ui.sidebar.collapse();
+                ui.sidebar.expand();
+                ui.workflow.setStep('data');
+                ui.inspector.setTab('current');
+                ui.taskCenter.render();
                 loadExportOptions();
                 loadUserProfile().catch((e) => console.warn('加载个人中心失败', e));
                 requestAnimationFrame(() => {
@@ -225,11 +312,18 @@ function renderPlannerConfig() {
     if(!container) return;
     const planner = selectedPlannerMeta();
     const params = planner?.parameters || [];
-    if(!params.length) {
+    const existingKeys = new Set(params.map((param) => param.key));
+    const defaults = [
+        { key: 'max_waypoints', label: '航点上限', type: 'number', default: 60, min: 10, max: 120, step: 1 },
+        { key: 'max_shots_per_waypoint', label: '单航点最大拍摄数', type: 'number', default: 3, min: 1, max: 6, step: 1 },
+        { key: 'target_manual_ratio', label: '人工航点比例(0.6-0.8)', type: 'number', default: 0.7, min: 0.6, max: 0.8, step: 0.05 }
+    ].filter((param) => !existingKeys.has(param.key));
+    const allParams = [...params, ...defaults];
+    if(!allParams.length) {
         container.innerHTML = '<div class="text-[11px] text-slate-400">当前算法使用默认配置。</div>';
         return;
     }
-    container.innerHTML = params.map((param) => `
+    container.innerHTML = allParams.map((param) => `
         <label class="block">
             <span class="text-[11px] text-slate-500 font-bold">${escapeHtml(param.label || param.key)}</span>
             <input
@@ -289,7 +383,7 @@ function getSelectedPlanningPointClouds() {
 function openAlgorithmMenu() {
     renderPlanningPointCloudPicker();
     renderPlannerConfig();
-    ui.dropdown.toggle('dd-calc');
+    openDropdown('dd-calc');
 }
 
 function profileFileTypeLabel(category) {
@@ -422,7 +516,7 @@ async function refreshUserProfileData() {
     if(list) list.innerHTML = '<div class="text-sm text-slate-400 text-center py-10">正在刷新用户数据...</div>';
     const res = await API.rescanProfile();
     if(res.status !== 'success') {
-        alert(res.message || '刷新失败');
+        notify('刷新失败', res.message || '刷新失败', 'error');
         renderProfileFiles(getFilteredProfileFiles());
         return;
     }
@@ -457,7 +551,7 @@ async function saveProfileChanges() {
         notes
     });
     if(res.status !== 'success') {
-        alert(res.message || '保存失败');
+        notify('保存失败', res.message || '保存失败', 'error');
         return;
     }
     state.user.name = res.data.username;
@@ -467,7 +561,7 @@ async function saveProfileChanges() {
     profileFilesCache = Array.isArray(res.data.files) ? res.data.files : [];
     syncProfileSummary(res.data);
     renderProfileFiles(getFilteredProfileFiles());
-    alert('个人中心已更新');
+    notify('个人中心已更新', '账户资料和文件概况已刷新。', 'success');
 }
 
 function loadProfileFile(category, filename) {
@@ -481,7 +575,7 @@ async function handleProfileRename(category, oldName) {
     if(!newName || newName === oldName) return;
     const res = await API.renameFile(category, oldName, newName.trim());
     if(res.status !== 'success') {
-        alert(res.message || '重命名失败');
+        notify('重命名失败', res.message || '重命名失败', 'error');
         return;
     }
     const layerCategoryMap = {
@@ -503,7 +597,7 @@ async function handleProfileDelete(category, filename) {
     if(!confirm(`确认删除 ${filename} 吗？`)) return;
     const res = await API.deleteFile(category, filename);
     if(res.status !== 'success') {
-        alert(res.message || '删除失败');
+        notify('删除失败', res.message || '删除失败', 'error');
         return;
     }
     const layerCategoryMap = {
@@ -524,13 +618,18 @@ async function handleProfileDelete(category, filename) {
 async function executeUpload() {
     const cat = document.getElementById('upload-category').value;
     const file = document.getElementById('upload-input').files[0];
-    if(!file) return;
+    if(!file) {
+        notify('请选择文件', '上传前需要先选择一个本地文件。', 'warning');
+        return;
+    }
 
+    const taskId = ui.taskCenter.add({ title: '上传文件', detail: file.name, type: cat });
     if (ui.loading) ui.loading.start();
     try {
         const res = await API.uploadFile(cat, file);
         if(res.status === 'success') {
-            alert('上传成功！');
+            ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: `${file.name} 已上传` });
+            showOperationResult('上传成功', file.name, 'success');
             ui.modals.close('upload-modal');
             // 如果是管理员，刷新列表
             if(state.user && state.user.role === 'admin') {
@@ -542,16 +641,19 @@ async function executeUpload() {
                 handleProfileSearch();
             }
         } else {
-            alert("上传失败: " + res.message);
+            ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: res.message });
+            notify('上传失败', res.message, 'error');
         }
     } catch(e) {
-        alert("系统错误: " + e.message);
+        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
+        notify('系统错误', e.message, 'error');
     } finally {
         if (ui.loading) ui.loading.stop();
     }
 }
 
 async function handleFileSelect(cat, filename) {
+    const taskId = ui.taskCenter.add({ title: '加载数据', detail: filename, type: cat });
     if (ui.loading) ui.loading.start();
     try {
         if (cat === 'point_cloud') {
@@ -560,8 +662,23 @@ async function handleFileSelect(cat, filename) {
                 ui.layers.clearSceneLayers({ resetCenter: true });
                 Scene.renderPointCloud(res.data, filename);
                 ui.layers.add('pointcloud', filename);
+                state.activeScene = filename;
+                selectAssetForInspector('pointcloud', filename, {
+                    title: filename,
+                    description: '已加载点云，可进行体素化和语义建模。',
+                    icon: 'ph-cloud',
+                    typeLabel: '点云',
+                    fields: {
+                        文件: filename,
+                        点数: res.data.points?.length || '--',
+                        语义标签: res.data.labels?.length ? '已提供' : '未提供'
+                    }
+                });
                 renderPlanningPointCloudPicker();
                 ui.led.set('pc', true);
+                ui.workflow.setStep('model');
+                ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: `${filename} 已加载到三维视窗` });
+                showOperationResult('点云已加载', '下一步可执行点云栅格化。', 'success');
             } else throw new Error(res.message);
         }
         else if (cat === 'manual_route' || cat === 'algorithm_route' || cat === 'waypoint') {
@@ -579,12 +696,31 @@ async function handleFileSelect(cat, filename) {
                 ui.sidebar.render(res.data.waypoints, filename, routeType);
                 ui.sidebar.setRouteMeta(filename, res.data.method, res.data.method_name);
                 ui.led.set('route', true);
+                selectAssetForInspector('route', filename, {
+                    title: filename,
+                    description: res.data.method_name || '航点/航线结果',
+                    icon: 'ph-path',
+                    typeLabel: cat === 'manual_route' ? '人工航线' : '算法航线/航点',
+                    status: '已加载',
+                    stats: res.data.stats,
+                    fields: {
+                        文件: filename,
+                        类型: cat === 'manual_route' ? '人工航线' : '算法结果',
+                        航点数: res.data.waypoints?.length || 0
+                    }
+                });
+                if(res.data.stats) ui.inspector.renderMetrics(res.data.stats);
+                ui.workflow.setStep(cat === 'waypoint' ? 'route' : 'safety');
+                ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: `${filename} 已加载` });
+                showOperationResult('航点/航线已加载', '可在右侧检查器查看航点序列和指标。', 'success');
             } else throw new Error(res.message);
         }
     } catch (e) {
-        alert(e.message);
+        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
+        notify('加载失败', e.message, 'error');
     } finally {
         if (ui.loading) ui.loading.stop();
+        updateReadiness();
     }
 }
 
@@ -604,18 +740,62 @@ async function loadWaypointResult(filename, showAlert = false) {
     ui.sidebar.render(res.data.waypoints, filename, 'best');
     ui.sidebar.setRouteMeta(filename, res.data.method, res.data.method_name);
     ui.led.set('route', true);
+    selectAssetForInspector('route', filename, {
+        title: filename,
+        description: res.data.method_name || '算法航点规划结果',
+        icon: 'ph-flag-checkered',
+        typeLabel: '算法航点',
+        stats: res.data.stats,
+        fields: {
+            文件: filename,
+            方法: res.data.method_name || res.data.method || '算法航点',
+            航点数: res.data.waypoints?.length || 0
+        }
+    });
+    if(res.data.stats) ui.inspector.renderMetrics(res.data.stats);
+    ui.workflow.setStep('route');
 
-    if (showAlert) alert(`规划完成，已自动加载结果：${filename}`);
+    if (showAlert) showOperationResult('规划结果已加载', filename, 'success');
     loadExportOptions();
+    updateReadiness();
+}
+
+async function listCategoryNames(category) {
+    const res = await API.fetchList(category);
+    if(res.status !== 'success') return [];
+    return (res.data || []).map((item) => item.name);
+}
+
+async function expectedVoxelMissing(pointCloudNames) {
+    const available = new Set([
+        ...(state.loadedAssets.voxel || []).map((item) => item.id),
+        ...(await listCategoryNames('voxel'))
+    ]);
+    return pointCloudNames
+        .map((name) => `${name.replace(/\.[^.]+$/, '')}_voxel.npz`)
+        .filter((voxelName) => !available.has(voxelName));
+}
+
+function renderPreflightIssue(title, message, step = 'model') {
+    ui.workflow.setStep(step);
+    ui.inspector.setTab('log');
+    notify(title, message, 'warning');
 }
 
 async function runVoxelization() {
     const pointclouds = [...(state.loadedAssets.pointcloud || [])];
-    if(!pointclouds.length) return alert("请先加载点云");
+    if(!pointclouds.length) {
+        renderPreflightIssue('缺少点云', '请先在项目/数据步骤加载至少一个点云文件。', 'data');
+        return;
+    }
 
+    ui.taskCenter.toggle(true);
     for(const item of pointclouds) {
         const trigger = await API.processVoxelize(item.id);
-        if (trigger.status !== 'success') return alert(`启动体素化失败：${trigger.message || '未知错误'}`);
+        if (trigger.status !== 'success') {
+            notify('启动体素化失败', trigger.message || '未知错误', 'error');
+            return;
+        }
 
         await ui.progress.start('voxelize', async () => {
             ui.led.set('vox', true);
@@ -628,19 +808,35 @@ async function runVoxelization() {
                 ui.layers.add('voxel', voxelLayerId);
                 ui.layers.updateMeta('voxel', voxelLayerId, { label: `栅格数据 · ${voxName}` });
             }
+        }, {
+            title: '点云体素化',
+            detail: item.id,
+            success: `${item.id} 体素化完成`
         });
     }
-    alert(`已完成 ${pointclouds.length} 个点云的栅格化。`);
+    ui.workflow.setStep('waypoint');
+    showOperationResult('点云建模完成', `已完成 ${pointclouds.length} 个点云的栅格化。`, 'success');
+    updateReadiness();
 }
 
 async function runRL() {
     const selectedPointClouds = getSelectedPlanningPointClouds();
-    if(!selectedPointClouds.length) return alert("请先加载点云，并在航点管理中选择要规划的点云");
+    if(!selectedPointClouds.length) {
+        renderPreflightIssue('缺少规划点云', '请先加载点云，并在航点管理中选择要规划的点云。', 'data');
+        return;
+    }
+
+    const missingVoxels = await expectedVoxelMissing(selectedPointClouds);
+    if(missingVoxels.length) {
+        renderPreflightIssue('缺少体素数据', `未找到 ${missingVoxels.join('、')}，请先执行点云栅格化。`, 'model');
+        return;
+    }
 
     const plannerSelect = document.getElementById('planner-select');
     const plannerKey = plannerSelect ? plannerSelect.value : '语义表面体素分层强化学习多焦段视点规划';
     const constraints = collectPlannerConstraints();
 
+    ui.taskCenter.toggle(true);
     for(const pointCloudName of selectedPointClouds) {
         const base = pointCloudName.replace(/\.[^.]+$/, '');
         const voxName = `${base}_voxel.npz`;
@@ -648,32 +844,32 @@ async function runRL() {
 
         const trigger = await API.processRL(voxName, plannerKey, constraints);
         if (trigger.status !== 'success') {
-            return alert(`启动 ${pointCloudName} 的 ${plannerKey} 失败：${trigger.message || '未知错误'}`);
+            notify('启动航点规划失败', `${pointCloudName}：${trigger.message || '未知错误'}`, 'error');
+            return;
         }
 
         await ui.progress.start('rl', async () => {
             try {
                 await loadWaypointResult(wpName, false);
             } catch (e) {
-                alert(`规划已完成，但自动加载结果失败：${e.message}`);
+                notify('自动加载结果失败', e.message, 'warning');
             }
+        }, {
+            title: '航点规划',
+            detail: `${pointCloudName} · ${plannerKey}`,
+            success: `${pointCloudName} 航点规划完成`
         });
     }
-    alert(`已完成 ${selectedPointClouds.length} 个点云的航点规划。`);
+    showOperationResult('航点规划完成', `已完成 ${selectedPointClouds.length} 个点云的航点规划。`, 'success');
+    updateReadiness();
 }
 
 function setCompareVisible(visible) {
     const compare = document.getElementById('compare-page');
-    const canvas = document.getElementById('canvas-container');
-    const sidebar = document.getElementById('sidebar-panel');
-    const sidebarBtn = document.getElementById('sidebar-expand-btn');
-    const ledPanel = document.getElementById('status-led-panel');
 
+    state.compareVisible = visible;
     if(compare) compare.classList.toggle('hidden', !visible);
-    if(canvas) canvas.classList.toggle('hidden', visible);
-    if(sidebar) sidebar.classList.toggle('hidden', visible);
-    if(sidebarBtn) sidebarBtn.classList.toggle('hidden', true);
-    if(ledPanel) ledPanel.classList.toggle('hidden', visible);
+    ui.workflow.setStep('export');
     if(!visible && Scene.resizeRenderer) {
         requestAnimationFrame(() => Scene.resizeRenderer());
     }
@@ -975,14 +1171,29 @@ async function runRouteComparison() {
         category: el.dataset.category,
         filename: el.dataset.filename
     }));
-    if(!selections.length) return alert('请先选择需要对比的航点文件');
+    if(!selections.length) {
+        notify('请选择对比文件', '建议至少选择 1 组人工航点和 1 个算法结果。', 'warning');
+        return;
+    }
 
+    const taskId = ui.taskCenter.add({ title: '多算法对比', detail: `${selections.length} 个文件`, type: 'compare' });
     const res = await API.compareRoutes(selections);
-    if(res.status !== 'success') return alert(res.message || '对比失败');
+    if(res.status !== 'success') {
+        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: res.message || '对比失败' });
+        notify('对比失败', res.message || '对比失败', 'error');
+        return;
+    }
     const items = res.data.items || [];
     updateCompareSummary(items);
     renderCompareCharts(items);
     renderCompareTable(items);
+    const best = (items || []).find((item) => !item.error && item.category === 'waypoint') || (items || []).find((item) => !item.error);
+    if(best?.stats) {
+        ui.inspector.renderMetrics(best.stats);
+        ui.inspector.setTab('metrics');
+    }
+    ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: '对比指标已更新' });
+    showOperationResult('对比完成', '覆盖率、安全距离和航点效率已更新。', 'success');
 }
 
 async function loadExportOptions() {
@@ -996,7 +1207,11 @@ async function loadExportOptions() {
             container.innerHTML = '<div class="text-xs text-slate-400 text-center py-2 italic">暂无可导出的算法航线</div>';
             return;
         }
-        container.innerHTML = res.data.map((f) => `
+        container.innerHTML = `
+            <div class="rounded-lg border border-slate-200 bg-white p-2 mb-2 text-[11px] text-slate-500 leading-relaxed">
+                导出前建议先完成安全距离校验。导出文件保留算法航线 JSON、航点序列、航程与规划参数，可用于论文归档或后续格式转换。
+            </div>
+        ` + res.data.map((f) => `
             <button onclick="exportRouteFile('${f.name.replace(/'/g, "\\'")}')" class="w-full text-left p-2 rounded hover:bg-slate-50 transition flex items-center justify-between gap-2">
                 <span class="min-w-0">
                     <span class="block text-sm font-bold text-slate-700 truncate" title="${f.name}">${f.name}</span>
@@ -1027,11 +1242,23 @@ function numericInputValue(id, fallback) {
 function routeSafetySettingsHtml(prefix) {
     return `
         <div class="rounded-lg border border-slate-200 bg-white p-2 mb-2">
-            <div class="text-[11px] font-bold text-slate-500 mb-2">安全距离参数(m)</div>
-            <div class="grid grid-cols-1 gap-2 text-xs">
+            <div class="text-[11px] font-bold text-slate-500 mb-2">电力巡检安全参数(m)</div>
+            <div class="grid grid-cols-2 gap-2 text-xs">
                 <label class="block">
-                    <span class="block text-slate-400 mb-1">安全距离</span>
+                    <span class="block text-slate-400 mb-1">统一安全距离</span>
                     <input id="${prefix}-safety-distance" type="number" min="0.5" max="40" step="0.1" value="5" class="w-full border border-slate-200 rounded px-2 py-1">
+                </label>
+                <label class="block">
+                    <span class="block text-slate-400 mb-1">杆塔净距</span>
+                    <input id="${prefix}-tower-clearance" type="number" min="0.5" max="30" step="0.1" value="6" class="w-full border border-slate-200 rounded px-2 py-1">
+                </label>
+                <label class="block">
+                    <span class="block text-slate-400 mb-1">导线净距</span>
+                    <input id="${prefix}-wire-clearance" type="number" min="0.5" max="40" step="0.1" value="10" class="w-full border border-slate-200 rounded px-2 py-1">
+                </label>
+                <label class="block">
+                    <span class="block text-slate-400 mb-1">进出塔距离</span>
+                    <input id="${prefix}-entry-distance" type="number" min="10" max="80" step="1" value="28" class="w-full border border-slate-200 rounded px-2 py-1">
                 </label>
             </div>
         </div>
@@ -1041,6 +1268,10 @@ function routeSafetySettingsHtml(prefix) {
 function getRouteSafetyOptions(prefix) {
     return {
         safety_distance_m: numericInputValue(`${prefix}-safety-distance`, 5),
+        tower_clearance_m: numericInputValue(`${prefix}-tower-clearance`, 6),
+        wire_clearance_m: numericInputValue(`${prefix}-wire-clearance`, 10),
+        clearance_m: numericInputValue(`${prefix}-tower-clearance`, 6),
+        entry_distance_m: numericInputValue(`${prefix}-entry-distance`, 28),
     };
 }
 
@@ -1124,6 +1355,7 @@ async function toggleRouteValidationPanel() {
 }
 
 async function validateRouteFile(category, filename) {
+    const taskId = ui.taskCenter.add({ title: '安全距离校验', detail: filename, type: 'safety' });
     if (ui.loading) ui.loading.start();
     try {
         const res = await API.validateRoute(category, filename, getRouteSafetyOptions('route-validation'));
@@ -1149,15 +1381,24 @@ async function validateRouteFile(category, filename) {
             }).join('\n');
             detail.push(`前5条违规：\n${sample}`);
         }
-        alert(detail.join('\n'));
+        state.lastSafetyResult = data;
+        ui.inspector.renderSafety(data);
+        ui.inspector.setTab('safety');
+        if(Scene.renderSafetyViolations) Scene.renderSafetyViolations(data);
+        ui.workflow.setStep('safety');
+        ui.taskCenter.update(taskId, { status: data.passed ? 'success' : 'error', progress: 100, detail: detail.join('；') });
+        showOperationResult(`安全校验${status}`, `违规数量：${data.violation_count || 0}`, data.passed ? 'success' : 'warning');
     } catch(e) {
-        alert(e.message);
+        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
+        notify('安全校验失败', e.message, 'error');
     } finally {
         if (ui.loading) ui.loading.stop();
+        updateReadiness();
     }
 }
 
 async function planRouteFromWaypoint(filename) {
+    const taskId = ui.taskCenter.add({ title: '自动规划航线', detail: filename, type: 'route' });
     if (ui.loading) ui.loading.start();
     try {
         const res = await API.planRoute(filename, getRouteSafetyOptions('route-plan'));
@@ -1166,19 +1407,29 @@ async function planRouteFromWaypoint(filename) {
         await handleFileSelect('algorithm_route', out);
         await loadUserProfile().catch(() => {});
         const c = res.data.clearance || {};
-        alert(`航线规划完成：${out}\n航线点数：${res.data.route_point_count}\n航程：${res.data.totalLen} m\nA*局部规划段：${res.data.astar_segment_count ?? 0}，失败回退：${res.data.astar_fallback_count ?? 0}\n安全距离：${c.safety_distance_m ?? c.task_tower_clearance_m ?? '--'}m\n导线禁飞体：${c.conductor_no_fly_volume_count ?? 0} 个`);
+        const detail = `航线点数 ${res.data.route_point_count}，航程 ${res.data.totalLen} m，A*局部规划段 ${res.data.astar_segment_count ?? 0}，失败回退 ${res.data.astar_fallback_count ?? 0}，导线禁飞体 ${c.conductor_no_fly_volume_count ?? 0} 个`;
+        ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail });
+        ui.workflow.setStep('safety');
+        showOperationResult('航线规划完成', `${out} · ${detail}`, 'success');
     } catch(e) {
-        alert(e.message);
+        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
+        notify('航线规划失败', e.message, 'error');
     } finally {
         if (ui.loading) ui.loading.stop();
+        updateReadiness();
     }
 }
 
 async function exportRouteFile(filename) {
+    const taskId = ui.taskCenter.add({ title: '导出航线', detail: filename, type: 'export' });
     try {
         await API.exportRoute(filename, 'algorithm_route');
+        ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: '文件已下载' });
+        ui.workflow.setStep('export');
+        showOperationResult('导出完成', filename, 'success');
     } catch(e) {
-        alert(`导出失败：${e.message}`);
+        ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
+        notify('导出失败', e.message, 'error');
     }
 }
 
@@ -1186,6 +1437,23 @@ async function exportRouteFile(filename) {
 window.addEventListener('waypoint-click', (e) => {
     if (!e || !e.detail || !e.detail.id) return;
     ui.sidebar.expandAndHighlight(e.detail.id, e.detail.fileId || null);
+    const wp = e.detail.waypoint || {};
+    const shots = Array.isArray(wp.shots) ? wp.shots : [];
+    ui.inspector.select({
+        category: 'route',
+        title: `${e.detail.fileId || '航线'} · ${e.detail.id}号航点`,
+        description: wp.action === 'photo' || wp.point_type === 'task' ? '任务拍摄航点' : '辅助飞行航点',
+        icon: 'ph-map-pin-line',
+        fields: {
+            文件: e.detail.fileId || '--',
+            坐标X: (wp.pos_utm?.[0] ?? e.detail.pos?.[0] ?? 0).toFixed ? (wp.pos_utm?.[0] ?? e.detail.pos?.[0] ?? 0).toFixed(1) : '--',
+            坐标Y: (wp.pos_utm?.[1] ?? e.detail.pos?.[1] ?? 0).toFixed ? (wp.pos_utm?.[1] ?? e.detail.pos?.[1] ?? 0).toFixed(1) : '--',
+            坐标Z: (wp.pos_utm?.[2] ?? e.detail.pos?.[2] ?? 0).toFixed ? (wp.pos_utm?.[2] ?? e.detail.pos?.[2] ?? 0).toFixed(1) : '--',
+            Yaw: `${wp.yaw ?? e.detail.yaw ?? '--'}°`,
+            Pitch: `${wp.pitch ?? e.detail.pitch ?? '--'}°`,
+            拍摄: `${wp.shot_count || shots.length || 1} 次`
+        }
+    });
 });
 
 async function handleDelete(cat, name) {
@@ -1204,7 +1472,7 @@ async function handleRename(cat, oldName) {
     if(res.status === 'success') {
         if(state.user.role === 'admin') ui.admin.renderTable(cat);
     } else {
-        alert(res.message);
+        notify('重命名失败', res.message, 'error');
     }
 }
 

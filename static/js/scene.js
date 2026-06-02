@@ -1,20 +1,24 @@
-import { state, alignCoordinates } from './state.js?v=3.3';
+import { state, alignCoordinates } from './state.js?v=3.6';
 
 let scene, camera, renderer, controls, raycaster, mouse, viewportContainer;
 let animationId;
+let pointSizeScale = 1;
+let globalOpacity = 1;
 
 // Group management for multiple files
 // Key: 'filename' -> THREE.Group
 const activeObjects = {
     pointcloud: {},
     route: {},
-    voxel: {} // Voxel is usually singular, but logic can adapt
+    voxel: {}, // Voxel is usually singular, but logic can adapt
+    safety: {}
 };
 
 function normalizeCategoryKey(cat) {
     const value = `${cat || ''}`.trim().toLowerCase();
     if (value === 'point_cloud') return 'pointcloud';
     if (value === 'manual_route' || value === 'algorithm_route' || value === 'waypoint') return 'route';
+    if (value === 'safety' || value === 'violation') return 'safety';
     return value;
 }
 
@@ -220,14 +224,16 @@ export function renderPointCloud(data, id) {
         geo.setAttribute('position', new THREE.Float32BufferAttribute(bucket.vertices, 3));
         geo.setAttribute('color', new THREE.Float32BufferAttribute(bucket.colors, 3));
         const mat = new THREE.PointsMaterial({
-            size: bucket.size,
+            size: bucket.size * pointSizeScale,
             vertexColors: true,
             transparent: true,
-            opacity: name === 'other' ? 0.55 : 0.96,
+            opacity: (name === 'other' ? 0.55 : 0.96) * globalOpacity,
             sizeAttenuation: true,
             depthWrite: name !== 'insulator'
         });
         const cloud = new THREE.Points(geo, mat);
+        cloud.userData.baseSize = bucket.size;
+        cloud.userData.baseOpacity = name === 'other' ? 0.55 : 0.96;
         cloud.name = `pointcloud-${name}`;
         group.add(cloud);
     });
@@ -283,6 +289,7 @@ export function renderRoute(waypoints, id, type='manual') {
         if(wp.yaw !== undefined) {
              const arrow = createArrow(pos, wp.pitch, wp.yaw, isTask ? 0x22c55e : 0x94a3b8);
              group.add(arrow);
+             if(isTask) group.add(createCameraFrustum(pos, wp.pitch || 0, wp.yaw || 0, type === 'manual' ? 0xc7446f : 0x0f8f7a));
         }
     });
 
@@ -335,14 +342,16 @@ export function renderVoxels(data, center, id) {
         geo.setAttribute('position', new THREE.Float32BufferAttribute(bucket.vertices, 3));
         geo.setAttribute('color', new THREE.Float32BufferAttribute(bucket.colors, 3));
         const mat = new THREE.PointsMaterial({
-            size: bucket.size,
+            size: bucket.size * pointSizeScale,
             vertexColors: true,
             transparent: true,
-            opacity: bucket.opacity,
+            opacity: bucket.opacity * globalOpacity,
             sizeAttenuation: true,
             depthWrite: false
         });
         const points = new THREE.Points(geo, mat);
+        points.userData.baseSize = bucket.size;
+        points.userData.baseOpacity = bucket.opacity;
         points.name = `voxel-${name}`;
         group.add(points);
     });
@@ -385,6 +394,109 @@ export function toggleObjectVisibility(cat, id, visible) {
     }
 }
 
+export function focusObject(cat, id) {
+    const key = normalizeCategoryKey(cat);
+    const obj = activeObjects[key]?.[id];
+    if(obj) fitCamera(obj);
+}
+
+export function resetView() {
+    if(!scene || !camera || !controls) return;
+    const box = new THREE.Box3();
+    let hasObject = false;
+    ['pointcloud', 'voxel', 'route'].forEach((key) => {
+        Object.values(activeObjects[key] || {}).forEach((obj) => {
+            if(!obj.visible) return;
+            const objBox = new THREE.Box3().setFromObject(obj);
+            if(!objBox.isEmpty()) {
+                box.union(objBox);
+                hasObject = true;
+            }
+        });
+    });
+    if(hasObject) fitBox(box);
+    else {
+        gsap.to(camera.position, { x: 100, y: 100, z: 100, duration: 0.8 });
+        gsap.to(controls.target, { x: 0, y: 0, z: 0, duration: 0.8 });
+    }
+}
+
+export function setPointSizeScale(scale = 1) {
+    pointSizeScale = Math.max(0.25, Math.min(3, Number(scale) || 1));
+    ['pointcloud', 'voxel'].forEach((key) => {
+        Object.values(activeObjects[key] || {}).forEach((obj) => {
+            obj.traverse((child) => {
+                if(child.isPoints && child.material) {
+                    child.material.size = (child.userData.baseSize || child.material.size || 1) * pointSizeScale;
+                    child.material.needsUpdate = true;
+                }
+            });
+        });
+    });
+}
+
+export function setGlobalOpacity(opacity = 1) {
+    globalOpacity = Math.max(0.15, Math.min(1, Number(opacity) || 1));
+    ['pointcloud', 'voxel', 'route'].forEach((key) => {
+        Object.values(activeObjects[key] || {}).forEach((obj) => {
+            obj.traverse((child) => {
+                if(child.material) {
+                    const materials = Array.isArray(child.material) ? child.material : [child.material];
+                    materials.forEach((mat) => {
+                        const base = child.userData.baseOpacity || mat.userData?.baseOpacity || mat.opacity || 1;
+                        mat.transparent = true;
+                        mat.opacity = base * globalOpacity;
+                        mat.needsUpdate = true;
+                    });
+                }
+            });
+        });
+    });
+}
+
+export function renderSafetyViolations(result = {}) {
+    removeObject('safety', 'latest');
+    if(!scene || !result || !Array.isArray(result.violations) || !result.violations.length) return;
+    const group = new THREE.Group();
+    const routeGroup = activeObjects.route[result.filename] || Object.values(activeObjects.route)[0];
+    if(!routeGroup) return;
+    const waypointMeshes = routeGroup.children.filter((child) => child.isMesh && child.name === 'waypoint');
+    const byId = new Map();
+    waypointMeshes.forEach((mesh, index) => {
+        byId.set(String(mesh.userData.id), mesh);
+        byId.set(String(index + 1), mesh);
+        byId.set(String(index), mesh);
+    });
+
+    result.violations.slice(0, 40).forEach((violation) => {
+        if(violation.type === 'segment') {
+            const from = byId.get(String(violation.from));
+            const to = byId.get(String(violation.to));
+            if(from && to) {
+                const line = new THREE.Line(
+                    new THREE.BufferGeometry().setFromPoints([from.position, to.position]),
+                    new THREE.LineBasicMaterial({ color: 0xdc2626, linewidth: 3, transparent: true, opacity: 0.95 })
+                );
+                group.add(line);
+            }
+            return;
+        }
+        const mesh = byId.get(String(violation.index));
+        if(!mesh) return;
+        const marker = new THREE.Mesh(
+            new THREE.SphereGeometry(1.55, 20, 20),
+            new THREE.MeshBasicMaterial({ color: 0xdc2626, transparent: true, opacity: 0.62, depthTest: false })
+        );
+        marker.position.copy(mesh.position);
+        marker.name = 'safety-violation';
+        marker.userData = violation;
+        group.add(marker);
+    });
+    if(!group.children.length) return;
+    scene.add(group);
+    activeObjects.safety.latest = group;
+}
+
 function createArrow(pos, pitch, yaw, color=0x00ff00) {
     const yawRad = (90 - yaw) * Math.PI / 180;
     const pitchRad = pitch * Math.PI / 180;
@@ -394,10 +506,44 @@ function createArrow(pos, pitch, yaw, color=0x00ff00) {
     return new THREE.ArrowHelper(new THREE.Vector3(x, y, z).normalize(), pos, 3, color, 0.6, 0.4);
 }
 
+function createCameraFrustum(pos, pitch, yaw, color=0x0f8f7a) {
+    const yawRad = (90 - yaw) * Math.PI / 180;
+    const pitchRad = pitch * Math.PI / 180;
+    const forward = new THREE.Vector3(
+        Math.cos(pitchRad) * Math.cos(yawRad),
+        Math.cos(pitchRad) * Math.sin(yawRad),
+        Math.sin(pitchRad)
+    ).normalize();
+    const up = new THREE.Vector3(0, 0, 1);
+    const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+    const realUp = new THREE.Vector3().crossVectors(right, forward).normalize();
+    const length = 6;
+    const width = 2.6;
+    const height = 1.8;
+    const center = pos.clone().add(forward.clone().multiplyScalar(length));
+    const corners = [
+        center.clone().add(right.clone().multiplyScalar(width)).add(realUp.clone().multiplyScalar(height)),
+        center.clone().add(right.clone().multiplyScalar(-width)).add(realUp.clone().multiplyScalar(height)),
+        center.clone().add(right.clone().multiplyScalar(-width)).add(realUp.clone().multiplyScalar(-height)),
+        center.clone().add(right.clone().multiplyScalar(width)).add(realUp.clone().multiplyScalar(-height))
+    ];
+    const points = [];
+    corners.forEach((corner) => points.push(pos, corner));
+    points.push(corners[0], corners[1], corners[1], corners[2], corners[2], corners[3], corners[3], corners[0]);
+    return new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(points),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.38 })
+    );
+}
+
 function fitCamera(obj) {
     resizeRenderer();
     const box = new THREE.Box3().setFromObject(obj);
     if(box.isEmpty()) return;
+    fitBox(box);
+}
+
+function fitBox(box) {
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const max = Math.max(size.x, size.y, size.z);

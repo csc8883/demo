@@ -1,4 +1,4 @@
-import { state } from './state.js?v=3.3';
+import { state } from './state.js?v=3.6';
 
 // 辅助函数：自动添加认证头
 function getAuthHeaders() {
