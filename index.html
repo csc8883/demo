@@ -119,7 +119,31 @@
                 <span>无人机巡检视点规划2.0</span>
             </div>
 
-            <div class="flex gap-1.5 text-xs">
+            <section id="workflow-bar" class="workflow-bar nav-workflow">
+                <button class="workflow-step active" data-step="data" onclick="setWorkflowStep('data')">
+                    <span>1</span><strong>项目/数据</strong>
+                </button>
+                <button class="workflow-step" data-step="model" onclick="setWorkflowStep('model')">
+                    <span>2</span><strong>点云建模</strong>
+                </button>
+                <button class="workflow-step" data-step="candidate" onclick="setWorkflowStep('candidate')">
+                    <span>3</span><strong>候选视点</strong>
+                </button>
+                <button class="workflow-step" data-step="waypoint" onclick="setWorkflowStep('waypoint')">
+                    <span>4</span><strong>航点规划</strong>
+                </button>
+                <button class="workflow-step" data-step="route" onclick="setWorkflowStep('route')">
+                    <span>5</span><strong>航线生成</strong>
+                </button>
+                <button class="workflow-step" data-step="safety" onclick="setWorkflowStep('safety')">
+                    <span>6</span><strong>安全校验</strong>
+                </button>
+                <button class="workflow-step" data-step="export" onclick="setWorkflowStep('export')">
+                    <span>7</span><strong>导出归档</strong>
+                </button>
+            </section>
+
+            <div id="legacy-action-menus" class="legacy-action-menus">
                 <!-- Dropdowns -->
                 <div class="relative">
                     <button class="nav-btn px-4 py-2 bg-slate-100 hover:bg-white hover:shadow border rounded-lg flex gap-2 items-center transition font-medium text-slate-700" onclick="ui.dropdown.toggle('dd-pc')">
@@ -233,38 +257,17 @@
             </div>
         </nav>
 
-        <section id="workflow-bar" class="workflow-bar shrink-0">
-            <button class="workflow-step active" data-step="data" onclick="setWorkflowStep('data')">
-                <span>1</span><strong>项目/数据</strong><small>导入点云与人工航线</small>
-            </button>
-            <button class="workflow-step" data-step="model" onclick="setWorkflowStep('model')">
-                <span>2</span><strong>点云建模</strong><small>体素化与语义目标</small>
-            </button>
-            <button class="workflow-step" data-step="candidate" onclick="setWorkflowStep('candidate')">
-                <span>3</span><strong>候选视点</strong><small>候选点与可视性</small>
-            </button>
-            <button class="workflow-step" data-step="waypoint" onclick="setWorkflowStep('waypoint')">
-                <span>4</span><strong>航点规划</strong><small>贪心/RL/分层RL</small>
-            </button>
-            <button class="workflow-step" data-step="route" onclick="setWorkflowStep('route')">
-                <span>5</span><strong>航线生成</strong><small>A*避障与进出塔</small>
-            </button>
-            <button class="workflow-step" data-step="safety" onclick="setWorkflowStep('safety')">
-                <span>6</span><strong>安全校验</strong><small>杆塔/导线/禁飞体</small>
-            </button>
-            <button class="workflow-step" data-step="export" onclick="setWorkflowStep('export')">
-                <span>7</span><strong>导出归档</strong><small>航线与参数快照</small>
-            </button>
-        </section>
-
         <div class="flex-1 flex overflow-hidden relative">
-            <aside id="layer-tree-panel" class="workspace-panel layer-tree-panel">
+            <aside id="layer-tree-panel" class="workspace-panel layer-tree-panel collapsed">
                 <div class="panel-title">
                     <div>
                         <p>PROJECT LAYERS</p>
                         <h2>图层树</h2>
                     </div>
-                    <span id="layer-count" class="panel-count hidden">0</span>
+                    <div class="flex items-center gap-2">
+                        <span id="layer-count" class="panel-count hidden">0</span>
+                        <button onclick="toggleLayerPanel()" title="收起图层树" class="panel-icon-btn"><i class="ph-bold ph-caret-left"></i></button>
+                    </div>
                 </div>
                 <div class="layer-tree-actions">
                     <button onclick="ui.modals.openList('point_cloud', 'handleFileSelect')" title="加载点云"><i class="ph-bold ph-cloud"></i></button>
@@ -281,7 +284,7 @@
                 </div>
             </aside>
             <!-- Collapsible Sidebar -->
-            <aside id="sidebar-panel" class="workspace-panel inspector-panel w-96 bg-white border-l flex flex-col z-10 shadow-lg relative">
+            <aside id="sidebar-panel" class="workspace-panel inspector-panel w-96 bg-white border-l flex flex-col z-10 shadow-lg relative collapsed">
                 <div class="p-4 border-b bg-slate-50 text-slate-600 flex justify-between items-center shrink-0">
                     <div>
                         <p class="text-[10px] font-bold text-slate-400">INSPECTOR</p>
@@ -329,11 +332,7 @@
             <!-- 3D Viewport -->
             <main id="canvas-container" class="flex-1 bg-slate-200 relative cursor-crosshair scene-viewport">
                 <div class="viewport-hud pointer-events-none">
-                    <div>
-                        <p>智能巡检视窗</p>
-                        <strong>点云 / 体素 / 航点协同显示</strong>
-                    </div>
-                    <span>拖拽旋转 · 滚轮缩放 · 点击航点定位</span>
+                    <strong>智能巡视窗口</strong>
                 </div>
                 <div class="scene-toolbar">
                     <button onclick="resetSceneView()" title="复位视角"><i class="ph-bold ph-crosshair"></i></button>
@@ -364,7 +363,10 @@
                 </div>
 
                 <!-- Toggle Sidebar Hint (Visible when sidebar collapsed) -->
-                <button id="sidebar-expand-btn" onclick="ui.sidebar.toggle()" class="absolute top-4 left-4 bg-white/90 p-2 rounded-lg shadow border hover:bg-white z-30">
+                <button id="layer-expand-btn" onclick="toggleLayerPanel()" class="absolute top-4 left-4 bg-white/90 p-2 rounded-lg shadow border hover:bg-white z-30" title="展开图层树">
+                    <i class="ph-bold ph-layers text-xl text-slate-600"></i>
+                </button>
+                <button id="sidebar-expand-btn" onclick="ui.sidebar.toggle()" class="absolute top-4 right-4 bg-white/90 p-2 rounded-lg shadow border hover:bg-white z-30" title="展开对象检查器">
                     <i class="ph-bold ph-sidebar-simple text-xl text-slate-600"></i>
                 </button>
             </main>

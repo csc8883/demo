@@ -62,6 +62,7 @@ window.saveProfileChanges = saveProfileChanges;
 window.handleProfileSearch = handleProfileSearch;
 window.handleProfileDelete = handleProfileDelete;
 window.setWorkflowStep = setWorkflowStep;
+window.toggleLayerPanel = toggleLayerPanel;
 window.focusLayer = focusLayer;
 window.resetSceneView = resetSceneView;
 window.setScenePointSize = setScenePointSize;
@@ -167,6 +168,16 @@ function setWorkflowStep(step) {
     if(actionMap[step]) actionMap[step]();
 }
 
+function toggleLayerPanel(force) {
+    const panel = document.getElementById('layer-tree-panel');
+    const btn = document.getElementById('layer-expand-btn');
+    if(!panel) return;
+    const nextOpen = typeof force === 'boolean' ? force : panel.classList.contains('collapsed');
+    panel.classList.toggle('collapsed', !nextOpen);
+    if(btn) btn.classList.toggle('hidden', nextOpen);
+    if(Scene.resizeRenderer) requestAnimationFrame(() => Scene.resizeRenderer());
+}
+
 function focusLayer(cat, id) {
     if(Scene.focusObject) Scene.focusObject(cat, id);
 }
@@ -255,7 +266,8 @@ async function handleAuth() {
             } else {
                 document.getElementById('user-app').classList.remove('hidden');
                 setCurrentUserDisplay(state.user.display_name || state.user.name);
-                ui.sidebar.expand();
+                ui.sidebar.collapse();
+                toggleLayerPanel(false);
                 ui.workflow.setStep('data');
                 ui.inspector.setTab('current');
                 ui.taskCenter.render();
@@ -314,9 +326,7 @@ function renderPlannerConfig() {
     const params = planner?.parameters || [];
     const existingKeys = new Set(params.map((param) => param.key));
     const defaults = [
-        { key: 'max_waypoints', label: '航点上限', type: 'number', default: 60, min: 10, max: 120, step: 1 },
         { key: 'max_shots_per_waypoint', label: '单航点最大拍摄数', type: 'number', default: 3, min: 1, max: 6, step: 1 },
-        { key: 'target_manual_ratio', label: '人工航点比例(0.6-0.8)', type: 'number', default: 0.7, min: 0.6, max: 0.8, step: 0.05 }
     ].filter((param) => !existingKeys.has(param.key));
     const allParams = [...params, ...defaults];
     if(!allParams.length) {
@@ -347,12 +357,6 @@ function collectPlannerConstraints() {
         const value = input.value;
         if(value === '') return;
         const normalizedValue = input.type === 'number' ? Number(value) : value;
-        if(key === 'target_manual_ratio') {
-            const ratio = Math.max(0.6, Math.min(0.8, Number(normalizedValue)));
-            constraints.manual_ratio_min = Number(ratio.toFixed(2));
-            constraints.manual_ratio_max = Number(ratio.toFixed(2));
-            return;
-        }
         constraints[key] = normalizedValue;
     });
     return constraints;
