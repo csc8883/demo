@@ -13,7 +13,7 @@
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="/static/css/tailwind-fallback.css?v=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=2.4">
-    <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.8" />
+    <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.9" />
     <style>
         .status-light { width: 6px; height: 20px; background: #cbd5e1; transition: all 0.3s; border-radius: 4px; }
         .active { background-color: #22c55e !important; box-shadow: 0 0 10px #22c55e; }
@@ -24,37 +24,6 @@
 
     <!-- 1. Entry / Login Experience -->
     <div id="login-modal" class="entry-gate fixed inset-0 z-[100]">
-        <section class="entry-section entry-hero">
-            <div class="power-field" aria-hidden="true">
-                <span class="scan-beam beam-a"></span>
-                <span class="scan-beam beam-b"></span>
-                <span class="drone-path path-a"></span>
-                <span class="drone-path path-b"></span>
-                <span class="pulse-node node-a"></span>
-                <span class="pulse-node node-b"></span>
-                <span class="pulse-node node-c"></span>
-            </div>
-            <div class="entry-topline">
-                <div class="entry-brand-mark">
-                    <i class="ph-fill ph-lightning"></i>
-                </div>
-                <span>无人机电力巡检航线规划系统</span>
-            </div>
-            <div class="entry-copy">
-                <p class="entry-kicker">POWER ROUTE INTELLIGENCE</p>
-                <h1>从点云到航线，让杆塔巡检更稳定。</h1>
-                <p class="entry-subtitle">融合电力点云、体素建模、可见性分析与多算法航点规划，辅助生成清晰、可对比、可导出的巡检路径。</p>
-                <div class="entry-actions">
-                    <button onclick="scrollToLogin()" class="entry-primary">进入登录</button>
-                    <span>上滑继续</span>
-                </div>
-            </div>
-            <button onclick="scrollToLogin()" class="scroll-cue" aria-label="进入登录页面">
-                <span></span>
-                <i class="ph-bold ph-arrow-down"></i>
-            </button>
-        </section>
-
         <section id="auth-section" class="entry-section auth-stage">
             <div class="auth-grid-motion" aria-hidden="true">
                 <span class="orbit-line orbit-a"></span>
@@ -72,7 +41,7 @@
                     <div class="route-sparkline">
                         <span></span><span></span><span></span><span></span>
                     </div>
-                    <p>巡检任务接入</p>
+                    <p>巡视任务智能生成</p>
                 </div>
 
                 <div class="auth-card">
@@ -104,7 +73,6 @@
                     <button onclick="handleAuth()" id="auth-btn" class="w-full mt-8 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg font-bold transition shadow-lg shadow-blue-600/30">
                         进入系统
                     </button>
-                    <p class="mt-4 text-xs text-center text-slate-400">默认管理员：admin / admin</p>
                 </div>
             </div>
         </section>
@@ -674,7 +642,7 @@
         }
     </script>
 
-    <script type="module" src="/static/js/app.js?v=3.8"></script>
+    <script type="module" src="/static/js/app.js?v=3.9"></script>
 </body>
 </html>
 

@@ -1,6 +1,6 @@
-import * as API from './api.js?v=3.8';
-import { state, resetCoordinateCenter } from './state.js?v=3.8';
-import * as Scene from './scene.js?v=3.8';
+import * as API from './api.js?v=3.9';
+import { state, resetCoordinateCenter } from './state.js?v=3.9';
+import * as Scene from './scene.js?v=3.9';
 
 const $ = (id) => document.getElementById(id);
 const routeDomKey = (filename) => encodeURIComponent(String(filename ?? ''));

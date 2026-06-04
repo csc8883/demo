@@ -1,7 +1,7 @@
-import { state, resetState } from './state.js?v=3.8';
-import * as API from './api.js?v=3.8';
-import * as Scene from './scene.js?v=3.8';
-import { ui } from './ui.js?v=3.8';
+import { state, resetState } from './state.js?v=3.9';
+import * as API from './api.js?v=3.9';
+import * as Scene from './scene.js?v=3.9';
+import { ui } from './ui.js?v=3.9';
 
 console.log("App initializing...");
 
@@ -179,10 +179,19 @@ function notify(title, message = '', type = 'info') {
     if(ui.log?.add) ui.log.add(title, message, type);
 }
 
-function openDropdown(id) {
+function openDropdown(id, options = {}) {
+    const target = document.getElementById(id);
+    const shouldClose = !!options.toggle && target && !target.classList.contains('hidden');
+
     document.querySelectorAll('.dropdown-menu').forEach((el) => {
-        el.classList.toggle('hidden', el.id !== id);
+        el.classList.add('hidden');
     });
+
+    if(target && !shouldClose) {
+        target.classList.remove('hidden');
+        return true;
+    }
+    return false;
 }
 
 function setProjectTab(tab) {
@@ -194,9 +203,10 @@ function refreshProjectPanel() {
     renderProjectPanel();
 }
 
-function openProjectPanel(tab = activeProjectTab) {
+function openProjectPanel(tab = activeProjectTab, options = {}) {
     activeProjectTab = projectTabConfig[tab] ? tab : 'point_cloud';
-    openDropdown('dd-project');
+    const opened = openDropdown('dd-project', options);
+    if(!opened) return;
     renderProjectPanel();
 }
 
@@ -323,8 +333,9 @@ function openRouteSubPanel(panelId, loader) {
     if(loader) loader();
 }
 
-function openRouteWorkflowMenu() {
-    openDropdown('dd-manual');
+function openRouteWorkflowMenu(options = {}) {
+    const opened = openDropdown('dd-manual', options);
+    if(!opened) return;
     const routePanel = document.getElementById('route-plan-list-container');
     const validationPanel = document.getElementById('route-validation-list-container');
     if(routePanel) routePanel.classList.remove('hidden');
@@ -336,11 +347,11 @@ function openRouteWorkflowMenu() {
 function setWorkflowStep(step) {
     ui.workflow.setStep(step);
     const actionMap = {
-        data: () => openProjectPanel(),
-        model: () => openDropdown('dd-pc'),
-        waypoint: () => openAlgorithmMenu(),
-        route: () => openRouteWorkflowMenu(),
-        compare: () => openComparePage()
+        data: () => openProjectPanel(activeProjectTab, { toggle: true }),
+        model: () => openDropdown('dd-pc', { toggle: true }),
+        waypoint: () => openAlgorithmMenu({ toggle: true }),
+        route: () => openRouteWorkflowMenu({ toggle: true }),
+        compare: () => state.compareVisible ? closeComparePage() : openComparePage()
     };
     if(actionMap[step]) actionMap[step]();
 }
@@ -561,10 +572,10 @@ function getSelectedPlanningPointClouds() {
     return (state.loadedAssets.pointcloud || []).map((item) => item.id);
 }
 
-function openAlgorithmMenu() {
+function openAlgorithmMenu(options = {}) {
     renderPlanningPointCloudPicker();
     renderPlannerConfig();
-    openDropdown('dd-calc');
+    openDropdown('dd-calc', options);
 }
 
 function profileFileTypeLabel(category) {
