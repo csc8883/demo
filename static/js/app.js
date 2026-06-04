@@ -1,7 +1,7 @@
-import { state, resetState } from './state.js?v=3.6';
-import * as API from './api.js?v=3.6';
-import * as Scene from './scene.js?v=3.6';
-import { ui } from './ui.js?v=3.6';
+import { state, resetState } from './state.js?v=3.8';
+import * as API from './api.js?v=3.8';
+import * as Scene from './scene.js?v=3.8';
+import { ui } from './ui.js?v=3.8';
 
 console.log("App initializing...");
 
@@ -62,6 +62,9 @@ window.saveProfileChanges = saveProfileChanges;
 window.handleProfileSearch = handleProfileSearch;
 window.handleProfileDelete = handleProfileDelete;
 window.setWorkflowStep = setWorkflowStep;
+window.openProjectPanel = openProjectPanel;
+window.setProjectTab = setProjectTab;
+window.refreshProjectPanel = refreshProjectPanel;
 window.toggleLayerPanel = toggleLayerPanel;
 window.focusLayer = focusLayer;
 window.resetSceneView = resetSceneView;
@@ -78,6 +81,41 @@ let compareRouteChart = null;
 let profileFilesCache = [];
 let profileDataCache = null;
 let plannerCatalog = [];
+let activeProjectTab = 'point_cloud';
+let projectPanelRequestId = 0;
+
+const projectTabConfig = {
+    point_cloud: {
+        title: '点云列表',
+        empty: '暂无点云数据',
+        loadLabel: '加载点云',
+        icon: 'ph-cloud',
+        tone: 'blue',
+        categories: [{ key: 'point_cloud', label: '点云' }],
+        uploads: [{ key: 'point_cloud', label: '导入点云', icon: 'ph-upload-simple' }]
+    },
+    routes: {
+        title: '航线列表',
+        empty: '暂无航线数据',
+        loadLabel: '加载航线',
+        icon: 'ph-path',
+        tone: 'purple',
+        categories: [
+            { key: 'manual_route', label: '人工航线' },
+            { key: 'algorithm_route', label: '算法航线' }
+        ],
+        uploads: [{ key: 'manual_route', label: '导入人工航线', icon: 'ph-upload-simple' }]
+    },
+    waypoint: {
+        title: '航点列表',
+        empty: '暂无航点数据',
+        loadLabel: '加载航点',
+        icon: 'ph-map-pin-line',
+        tone: 'green',
+        categories: [{ key: 'waypoint', label: '算法航点' }],
+        uploads: [{ key: 'waypoint', label: '导入航点', icon: 'ph-upload-simple' }]
+    }
+};
 
 window.handleProfileRename = handleProfileRename;
 window.openProfileUpload = openProfileUpload;
@@ -147,6 +185,137 @@ function openDropdown(id) {
     });
 }
 
+function setProjectTab(tab) {
+    activeProjectTab = projectTabConfig[tab] ? tab : 'point_cloud';
+    renderProjectPanel();
+}
+
+function refreshProjectPanel() {
+    renderProjectPanel();
+}
+
+function openProjectPanel(tab = activeProjectTab) {
+    activeProjectTab = projectTabConfig[tab] ? tab : 'point_cloud';
+    openDropdown('dd-project');
+    renderProjectPanel();
+}
+
+function renderProjectTabs() {
+    document.querySelectorAll('[data-project-tab]').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.projectTab === activeProjectTab);
+    });
+}
+
+function renderProjectActions(config) {
+    const actions = document.getElementById('project-panel-actions');
+    if(!actions) return;
+    actions.innerHTML = '';
+
+    config.uploads.forEach((upload) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `project-action-btn ${config.tone}`;
+        btn.innerHTML = `<i class="ph-bold ${upload.icon}"></i><span>${escapeHtml(upload.label)}</span>`;
+        btn.addEventListener('click', () => ui.modals.openUpload(upload.key));
+        actions.appendChild(btn);
+    });
+
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.className = 'project-action-btn muted';
+    refreshBtn.innerHTML = '<i class="ph-bold ph-arrows-clockwise"></i><span>刷新</span>';
+    refreshBtn.addEventListener('click', refreshProjectPanel);
+    actions.appendChild(refreshBtn);
+}
+
+function formatProjectFileMeta(file) {
+    const parts = [];
+    if(file.size) parts.push(file.size);
+    if(file.mtime) parts.push(new Date(file.mtime * 1000).toLocaleString());
+    if(file.owner) parts.push(file.owner);
+    return parts.join(' · ') || '当前工作区';
+}
+
+async function fetchProjectItems(config) {
+    const results = await Promise.all(config.categories.map(async (category) => {
+        const res = await API.fetchList(category.key);
+        if(res.status !== 'success') throw new Error(res.message || `${category.label}读取失败`);
+        return (res.data || []).map((file) => ({
+            ...file,
+            category: category.key,
+            categoryLabel: category.label
+        }));
+    }));
+
+    return results
+        .flat()
+        .sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+}
+
+function renderProjectRow(container, file, config) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `project-file-row ${config.tone}`;
+    row.title = `加载${file.categoryLabel}：${file.name}`;
+    row.addEventListener('click', () => {
+        ui.dropdown.closeAll();
+        handleFileSelect(file.category, file.name);
+    });
+
+    const main = document.createElement('span');
+    main.className = 'project-file-main';
+    main.innerHTML = `
+        <span class="project-file-icon"><i class="ph-bold ${config.icon}"></i></span>
+        <span class="project-file-text">
+            <strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong>
+            <small>${escapeHtml(formatProjectFileMeta(file))}</small>
+        </span>
+    `;
+
+    const badge = document.createElement('span');
+    badge.className = 'project-file-badge';
+    badge.textContent = file.categoryLabel;
+
+    const action = document.createElement('span');
+    action.className = 'project-file-action';
+    action.textContent = config.loadLabel;
+
+    row.appendChild(main);
+    row.appendChild(badge);
+    row.appendChild(action);
+    container.appendChild(row);
+}
+
+async function renderProjectPanel() {
+    const config = projectTabConfig[activeProjectTab] || projectTabConfig.point_cloud;
+    const body = document.getElementById('project-panel-body');
+    if(!body) return;
+
+    const requestId = ++projectPanelRequestId;
+    renderProjectTabs();
+    renderProjectActions(config);
+    body.innerHTML = '<div class="project-empty-state"><i class="ph-duotone ph-spinner animate-spin"></i><span>正在读取项目数据...</span></div>';
+
+    try {
+        const items = await fetchProjectItems(config);
+        if(requestId !== projectPanelRequestId) return;
+
+        body.innerHTML = '';
+        if(!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'project-empty-state';
+            empty.innerHTML = `<i class="ph-duotone ${config.icon}"></i><span>${escapeHtml(config.empty)}</span>`;
+            body.appendChild(empty);
+            return;
+        }
+
+        items.forEach((file) => renderProjectRow(body, file, config));
+    } catch (error) {
+        if(requestId !== projectPanelRequestId) return;
+        body.innerHTML = `<div class="project-empty-state error"><i class="ph-bold ph-warning"></i><span>${escapeHtml(error.message || '项目数据读取失败')}</span></div>`;
+    }
+}
+
 function openRouteSubPanel(panelId, loader) {
     openDropdown('dd-manual');
     const panel = document.getElementById(panelId);
@@ -154,16 +323,24 @@ function openRouteSubPanel(panelId, loader) {
     if(loader) loader();
 }
 
+function openRouteWorkflowMenu() {
+    openDropdown('dd-manual');
+    const routePanel = document.getElementById('route-plan-list-container');
+    const validationPanel = document.getElementById('route-validation-list-container');
+    if(routePanel) routePanel.classList.remove('hidden');
+    if(validationPanel) validationPanel.classList.remove('hidden');
+    loadRoutePlanOptions();
+    loadRouteValidationOptions();
+}
+
 function setWorkflowStep(step) {
     ui.workflow.setStep(step);
     const actionMap = {
-        data: () => ui.modals.openList('point_cloud', 'handleFileSelect'),
+        data: () => openProjectPanel(),
         model: () => openDropdown('dd-pc'),
-        candidate: () => openAlgorithmMenu(),
         waypoint: () => openAlgorithmMenu(),
-        route: () => openRouteSubPanel('route-plan-list-container', loadRoutePlanOptions),
-        safety: () => openRouteSubPanel('route-validation-list-container', loadRouteValidationOptions),
-        export: () => openRouteSubPanel('export-list-container', loadExportOptions)
+        route: () => openRouteWorkflowMenu(),
+        compare: () => openComparePage()
     };
     if(actionMap[step]) actionMap[step]();
 }
@@ -714,7 +891,7 @@ async function handleFileSelect(cat, filename) {
                     }
                 });
                 if(res.data.stats) ui.inspector.renderMetrics(res.data.stats);
-                ui.workflow.setStep(cat === 'waypoint' ? 'route' : 'safety');
+                ui.workflow.setStep('route');
                 ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: `${filename} 已加载` });
                 showOperationResult('航点/航线已加载', '可在右侧检查器查看航点序列和指标。', 'success');
             } else throw new Error(res.message);
@@ -873,7 +1050,7 @@ function setCompareVisible(visible) {
 
     state.compareVisible = visible;
     if(compare) compare.classList.toggle('hidden', !visible);
-    ui.workflow.setStep('export');
+    ui.workflow.setStep('compare');
     if(!visible && Scene.resizeRenderer) {
         requestAnimationFrame(() => Scene.resizeRenderer());
     }
@@ -1389,7 +1566,7 @@ async function validateRouteFile(category, filename) {
         ui.inspector.renderSafety(data);
         ui.inspector.setTab('safety');
         if(Scene.renderSafetyViolations) Scene.renderSafetyViolations(data);
-        ui.workflow.setStep('safety');
+        ui.workflow.setStep('route');
         ui.taskCenter.update(taskId, { status: data.passed ? 'success' : 'error', progress: 100, detail: detail.join('；') });
         showOperationResult(`安全校验${status}`, `违规数量：${data.violation_count || 0}`, data.passed ? 'success' : 'warning');
     } catch(e) {
@@ -1413,7 +1590,7 @@ async function planRouteFromWaypoint(filename) {
         const c = res.data.clearance || {};
         const detail = `航线点数 ${res.data.route_point_count}，航程 ${res.data.totalLen} m，A*局部规划段 ${res.data.astar_segment_count ?? 0}，失败回退 ${res.data.astar_fallback_count ?? 0}，导线禁飞体 ${c.conductor_no_fly_volume_count ?? 0} 个`;
         ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail });
-        ui.workflow.setStep('safety');
+        ui.workflow.setStep('route');
         showOperationResult('航线规划完成', `${out} · ${detail}`, 'success');
     } catch(e) {
         ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });
@@ -1429,7 +1606,7 @@ async function exportRouteFile(filename) {
     try {
         await API.exportRoute(filename, 'algorithm_route');
         ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: '文件已下载' });
-        ui.workflow.setStep('export');
+        ui.workflow.setStep('route');
         showOperationResult('导出完成', filename, 'success');
     } catch(e) {
         ui.taskCenter.update(taskId, { status: 'error', progress: 100, detail: e.message });

@@ -1,13 +1,13 @@
-import * as API from './api.js?v=3.6';
-import { state, resetCoordinateCenter } from './state.js?v=3.6';
-import * as Scene from './scene.js?v=3.6';
+import * as API from './api.js?v=3.8';
+import { state, resetCoordinateCenter } from './state.js?v=3.8';
+import * as Scene from './scene.js?v=3.8';
 
 const $ = (id) => document.getElementById(id);
 const routeDomKey = (filename) => encodeURIComponent(String(filename ?? ''));
 const waypointItemId = (filename, waypointId) => `wp-item-${routeDomKey(filename)}-${waypointId}`;
 const waypointDetailId = (filename, waypointId) => `wp-detail-${routeDomKey(filename)}-${waypointId}`;
 const shortTime = (ts = Date.now()) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-const stepOrder = ['data', 'model', 'candidate', 'waypoint', 'route', 'safety', 'export'];
+const stepOrder = ['data', 'model', 'waypoint', 'route', 'compare'];
 
 function assetMeta(cat) {
     const key = `${cat || ''}`;
@@ -167,7 +167,13 @@ export const ui = {
             const pcReady = (state.loadedAssets.pointcloud || []).length > 0;
             const voxReady = (state.loadedAssets.voxel || []).length > 0;
             const routeReady = (state.loadedAssets.route || []).length > 0;
-            const readyMap = { data: pcReady, model: voxReady, candidate: voxReady, waypoint: routeReady, route: routeReady, safety: !!state.lastSafetyResult, export: routeReady };
+            const readyMap = {
+                data: pcReady,
+                model: voxReady,
+                waypoint: pcReady || voxReady,
+                route: routeReady || !!state.lastSafetyResult,
+                compare: routeReady
+            };
             document.querySelectorAll('.workflow-step').forEach((btn) => {
                 const step = btn.dataset.step;
                 btn.classList.toggle('ready', !!readyMap[step]);
@@ -622,6 +628,7 @@ export const ui = {
                     checkbox.type = 'checkbox';
                     checkbox.checked = checked;
                     checkbox.className = 'accent-blue-600 cursor-pointer';
+                    checkbox.title = checked ? '隐藏图层' : '显示图层';
                     checkbox.addEventListener('change', () => window.toggleLayer(asset.cat, asset.id, checkbox));
 
                     const iconEl = document.createElement('i');
@@ -657,7 +664,7 @@ export const ui = {
                     focusBtn.addEventListener('click', () => window.focusLayer && window.focusLayer(asset.cat, asset.id));
 
                     const removeBtn = document.createElement('button');
-                    removeBtn.title = '移除图层';
+                    removeBtn.title = '从当前视图移除';
                     removeBtn.innerHTML = '<i class="ph-bold ph-x"></i>';
                     removeBtn.addEventListener('click', () => window.removeLayer(asset.cat, asset.id));
                     actions.appendChild(focusBtn);

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>无人机巡检视点规划2.0</title>
+    <title>电力巡视任务智能生成3.0</title>
     <script defer src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -13,7 +13,7 @@
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="/static/css/tailwind-fallback.css?v=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=2.4">
-    <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.6" />
+    <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.8" />
     <style>
         .status-light { width: 6px; height: 20px; background: #cbd5e1; transition: all 0.3s; border-radius: 4px; }
         .active { background-color: #22c55e !important; box-shadow: 0 0 10px #22c55e; }
@@ -116,42 +116,63 @@
         <nav class="h-16 bg-white border-b flex items-center px-6 justify-between z-20 shadow-sm shrink-0 app-nav">
             <div class="font-bold text-lg flex items-center gap-3 text-slate-800">
                 <div class="nav-brand-mark"><i class="ph-fill ph-lightning"></i></div>
-                <span>无人机巡检视点规划2.0</span>
+                <span>电力巡视任务智能生成3.0</span>
             </div>
 
             <section id="workflow-bar" class="workflow-bar nav-workflow">
                 <button class="workflow-step active" data-step="data" onclick="setWorkflowStep('data')">
-                    <span>1</span><strong>项目/数据</strong>
+                    <strong>项目</strong>
                 </button>
                 <button class="workflow-step" data-step="model" onclick="setWorkflowStep('model')">
-                    <span>2</span><strong>点云建模</strong>
-                </button>
-                <button class="workflow-step" data-step="candidate" onclick="setWorkflowStep('candidate')">
-                    <span>3</span><strong>候选视点</strong>
+                    <strong>点云建模</strong>
                 </button>
                 <button class="workflow-step" data-step="waypoint" onclick="setWorkflowStep('waypoint')">
-                    <span>4</span><strong>航点规划</strong>
+                    <strong>航点规划</strong>
                 </button>
                 <button class="workflow-step" data-step="route" onclick="setWorkflowStep('route')">
-                    <span>5</span><strong>航线生成</strong>
+                    <strong>航线生成</strong>
                 </button>
-                <button class="workflow-step" data-step="safety" onclick="setWorkflowStep('safety')">
-                    <span>6</span><strong>安全校验</strong>
-                </button>
-                <button class="workflow-step" data-step="export" onclick="setWorkflowStep('export')">
-                    <span>7</span><strong>导出归档</strong>
+                <button class="workflow-step" data-step="compare" onclick="setWorkflowStep('compare')">
+                    <strong>多算法对比</strong>
                 </button>
             </section>
 
             <div id="legacy-action-menus" class="legacy-action-menus">
                 <!-- Dropdowns -->
                 <div class="relative">
+                    <div id="dd-project" class="dropdown-menu project-data-panel hidden absolute top-full left-0 mt-2 bg-white shadow-xl border border-slate-100 rounded-xl p-3 z-50">
+                        <div class="project-panel-head">
+                            <div>
+                                <p>当前工作区</p>
+                                <h3>项目数据</h3>
+                            </div>
+                            <button onclick="refreshProjectPanel()" title="刷新项目数据" class="project-refresh-btn">
+                                <i class="ph-bold ph-arrows-clockwise"></i>
+                            </button>
+                        </div>
+                        <div class="project-tabs" role="tablist" aria-label="项目数据类型">
+                            <button type="button" data-project-tab="point_cloud" onclick="setProjectTab('point_cloud')" class="project-tab active">
+                                <i class="ph-bold ph-cloud"></i><span>点云列表</span>
+                            </button>
+                            <button type="button" data-project-tab="routes" onclick="setProjectTab('routes')" class="project-tab">
+                                <i class="ph-bold ph-path"></i><span>航线列表</span>
+                            </button>
+                            <button type="button" data-project-tab="waypoint" onclick="setProjectTab('waypoint')" class="project-tab">
+                                <i class="ph-bold ph-map-pin-line"></i><span>航点列表</span>
+                            </button>
+                        </div>
+                        <div id="project-panel-actions" class="project-panel-actions"></div>
+                        <div id="project-panel-body" class="project-panel-body">
+                            <div class="project-empty-state">正在读取项目数据...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="relative">
                     <button class="nav-btn px-4 py-2 bg-slate-100 hover:bg-white hover:shadow border rounded-lg flex gap-2 items-center transition font-medium text-slate-700" onclick="ui.dropdown.toggle('dd-pc')">
                         <i class="ph-bold ph-cloud text-blue-600"></i> 点云处理
                     </button>
                     <div id="dd-pc" class="dropdown-menu hidden absolute top-full left-0 mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-56 p-2 z-50">
-                        <button onclick="ui.modals.openUpload('point_cloud')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">导入点云</button>
-                        <button onclick="ui.modals.openList('point_cloud', 'handleFileSelect')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">加载点云</button>
                         <button onclick="runVoxelization()" class="block w-full text-left p-2.5 hover:bg-blue-50 rounded-lg transition flex justify-between text-blue-700 font-bold">
                             点云栅格化 <i class="ph-bold ph-cube text-blue-500"></i>
                         </button>
@@ -163,8 +184,6 @@
                         <i class="ph-bold ph-map-pin-line text-green-600"></i> 航点管理
                     </button>
                     <div id="dd-calc" class="dropdown-menu hidden absolute top-full left-0 mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-80 p-3 z-50">
-                        <button onclick="ui.modals.openUpload('waypoint')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">导入航点</button>
-                        <button onclick="ui.modals.openList('waypoint', 'handleFileSelect')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">加载规划航点</button>
                         <div class="px-2 py-2">
                             <label class="text-[11px] text-slate-500 font-bold block mb-1">选择算法</label>
                             <select id="planner-select" class="w-full text-xs border border-slate-200 rounded-lg p-2 bg-white">
@@ -195,10 +214,7 @@
                         <i class="ph-bold ph-pen-nib text-purple-600"></i> 航线管理
                     </button>
                     <div id="dd-manual" class="dropdown-menu hidden absolute top-full left-0 mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-72 p-2 z-50">
-                        <button onclick="ui.modals.openUpload('manual_route')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">导入人工航线</button>
-                        <button onclick="ui.modals.openList('manual_route', 'handleFileSelect')" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">加载人工航线</button>
-                        <button onclick="ui.modals.openList('algorithm_route', 'handleFileSelect')" class="block w-full text-left p-2.5 hover:bg-purple-50 rounded-lg transition text-purple-700">加载算法航线</button>
-                        <div class="border-t border-slate-100 mt-2 pt-2">
+                        <div class="space-y-1">
                             <button onclick="toggleRoutePlanPanel()" class="block w-full text-left p-2.5 hover:bg-purple-50 rounded-lg transition flex justify-between text-purple-700 font-bold">
                                 自动规划航线 <i class="ph-bold ph-path text-purple-600"></i>
                             </button>
@@ -257,7 +273,7 @@
             </div>
         </nav>
 
-        <div class="flex-1 flex overflow-hidden relative">
+        <div class="flex-1 flex overflow-hidden relative workspace-body">
             <aside id="layer-tree-panel" class="workspace-panel layer-tree-panel collapsed">
                 <div class="panel-title">
                     <div>
@@ -270,9 +286,6 @@
                     </div>
                 </div>
                 <div class="layer-tree-actions">
-                    <button onclick="ui.modals.openList('point_cloud', 'handleFileSelect')" title="加载点云"><i class="ph-bold ph-cloud"></i></button>
-                    <button onclick="ui.modals.openList('manual_route', 'handleFileSelect')" title="加载人工航线"><i class="ph-bold ph-path"></i></button>
-                    <button onclick="renderPlanningPointCloudPicker()" title="刷新规划点云"><i class="ph-bold ph-arrows-clockwise"></i></button>
                 </div>
                 <div id="layer-list-container" class="layer-tree-list">
                     <div class="empty-layer-state">暂无加载图层</div>
@@ -661,7 +674,7 @@
         }
     </script>
 
-    <script type="module" src="/static/js/app.js?v=3.6"></script>
+    <script type="module" src="/static/js/app.js?v=3.8"></script>
 </body>
 </html>
 

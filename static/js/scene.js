@@ -1,4 +1,4 @@
-import { state, alignCoordinates } from './state.js?v=3.6';
+import { state, alignCoordinates } from './state.js?v=3.8';
 
 let scene, camera, renderer, controls, raycaster, mouse, viewportContainer;
 let animationId;
