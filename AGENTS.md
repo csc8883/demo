@@ -51,13 +51,7 @@ Repository name: `demo`.
 # Copy and edit config, then start the dev server
 cp .env.example .env
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-
-# Run integration test scripts (run from repo root)
-python scripts/test_conductor_no_fly_volume.py
-python scripts/test_route_clearance_matrix.py
 ```
-
-There is no test framework. The scripts under `scripts/` are standalone integration tests that import from `waypoint_planning.*` directly (they add the repo root to `sys.path`).
 
 ## Architecture
 
