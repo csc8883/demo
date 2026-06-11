@@ -1,6 +1,6 @@
-import * as API from './api.js?v=3.9';
-import { state, resetCoordinateCenter } from './state.js?v=3.9';
-import * as Scene from './scene.js?v=3.9';
+import * as API from './api.js?v=4.0';
+import { state, resetCoordinateCenter } from './state.js?v=4.0';
+import * as Scene from './scene.js?v=4.0';
 
 const $ = (id) => document.getElementById(id);
 const routeDomKey = (filename) => encodeURIComponent(String(filename ?? ''));
@@ -163,10 +163,13 @@ export const ui = {
             document.querySelectorAll('.workflow-step').forEach((btn) => {
                 const step = btn.dataset.step;
                 btn.classList.toggle('active', step === state.activeStep);
+                if(step === state.activeStep) btn.setAttribute('aria-current', 'step');
+                else btn.removeAttribute('aria-current');
             });
             const pcReady = (state.loadedAssets.pointcloud || []).length > 0;
             const voxReady = (state.loadedAssets.voxel || []).length > 0;
             const routeReady = (state.loadedAssets.route || []).length > 0;
+            const hasSceneData = pcReady || voxReady || routeReady;
             const readyMap = {
                 data: pcReady,
                 model: voxReady,
@@ -184,6 +187,22 @@ export const ui = {
             if(pc) pc.textContent = pcReady ? `${state.loadedAssets.pointcloud.length} 个` : '未加载';
             if(vox) vox.textContent = voxReady ? `${state.loadedAssets.voxel.length} 个` : '未生成';
             if(route) route.textContent = routeReady ? `${state.loadedAssets.route.length} 条` : '未加载';
+
+            const emptyState = $('viewport-empty-state');
+            const legend = $('semantic-legend');
+            const statusPanel = $('status-led-panel');
+            const sceneName = $('scene-context-name');
+            if(emptyState) emptyState.classList.toggle('hidden', hasSceneData);
+            if(legend) legend.classList.toggle('hidden', !hasSceneData);
+            if(statusPanel) statusPanel.classList.toggle('hidden', !hasSceneData);
+            if(sceneName) {
+                const activeName = state.activeScene
+                    || state.loadedAssets.pointcloud?.[0]?.id
+                    || state.loadedAssets.voxel?.[0]?.id
+                    || state.loadedAssets.route?.[0]?.id;
+                sceneName.textContent = activeName || '未加载数据';
+                sceneName.title = activeName || '';
+            }
         }
     },
 
@@ -749,14 +768,69 @@ export const ui = {
     },
 
     dropdown: {
-        toggle(id) {
-            document.querySelectorAll('.dropdown-menu').forEach(el => {
-                if(el.id !== id) el.classList.add('hidden');
-            });
+        cleanup: null,
+        references: {
+            'dd-project': '.workflow-step[data-step="data"]',
+            'dd-pc': '.workflow-step[data-step="model"]',
+            'dd-calc': '.workflow-step[data-step="waypoint"]',
+            'dd-manual': '.workflow-step[data-step="route"]',
+            'dd-user': '.user-menu-trigger'
+        },
+        getReference(id) {
+            const selector = this.references[id];
+            return selector ? document.querySelector(selector) : null;
+        },
+        async position(id) {
+            const menu = $(id);
+            const reference = this.getReference(id);
+            const floating = window.FloatingUIDOM;
+            if(!menu || !reference || !floating?.computePosition) return;
+
+            if(this.cleanup) {
+                this.cleanup();
+                this.cleanup = null;
+            }
+
+            const update = async () => {
+                const placement = id === 'dd-user' ? 'bottom-end' : 'bottom-start';
+                const { x, y } = await floating.computePosition(reference, menu, {
+                    placement,
+                    strategy: 'fixed',
+                    middleware: [
+                        floating.offset(10),
+                        floating.flip({ padding: 12 }),
+                        floating.shift({ padding: 12 })
+                    ]
+                });
+                menu.style.setProperty('position', 'fixed', 'important');
+                menu.style.setProperty('left', `${Math.round(x)}px`, 'important');
+                menu.style.setProperty('top', `${Math.round(y)}px`, 'important');
+            };
+
+            if(floating.autoUpdate) this.cleanup = floating.autoUpdate(reference, menu, update);
+            else await update();
+        },
+        open(id) {
+            this.closeAll();
             const el = $(id);
-            if (el) el.classList.toggle('hidden');
+            if(!el) return false;
+            el.classList.remove('hidden');
+            this.position(id);
+            return true;
+        },
+        toggle(id) {
+            const el = $(id);
+            if(!el) return false;
+            const shouldOpen = el.classList.contains('hidden');
+            if(shouldOpen) return this.open(id);
+            this.closeAll();
+            return false;
         },
         closeAll() {
+            if(this.cleanup) {
+                this.cleanup();
+                this.cleanup = null;
+            }
             document.querySelectorAll('.dropdown-menu').forEach(el => el.classList.add('hidden'));
         }
     },

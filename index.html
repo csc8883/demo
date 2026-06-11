@@ -9,14 +9,19 @@
     <script defer src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <script defer src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
     <script defer src="https://unpkg.com/@phosphor-icons/web"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@floating-ui/core@1.7.5/dist/floating-ui.core.umd.min.js" integrity="sha256-/AzKIabPLvDJyQj77eBhTcryhejr/tINDhRPr8Lr8Fk=" crossorigin="anonymous"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@floating-ui/dom@1.7.6/dist/floating-ui.dom.umd.min.js" integrity="sha256-IUteAZ9w/aNsfwo15es6qE+lNEjA+MrE96TB4m5xSYw=" crossorigin="anonymous"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/sweetalert2@11.26.25/dist/sweetalert2.all.min.js" integrity="sha256-Tobw4i5HcbW4qsJMYTxmGAameLGvooTQPPatA9PiGgo=" crossorigin="anonymous"></script>
     <!-- Chart.js for Admin Dashboard -->
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11.26.25/dist/sweetalert2.min.css" integrity="sha256-oRc+Vv1HS+BN2++oG9dcxGVifvL12yYXkufSX7eHF0M=" crossorigin="anonymous">
     <link rel="stylesheet" href="/static/css/tailwind-fallback.css?v=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=2.4">
     <link rel="stylesheet" href="/static/css/theme-extra.css?v=3.9" />
+    <link rel="stylesheet" href="/static/css/ui-refresh.css?v=1.4" />
     <style>
         .status-light { width: 6px; height: 20px; background: #cbd5e1; transition: all 0.3s; border-radius: 4px; }
-        .active { background-color: #22c55e !important; box-shadow: 0 0 10px #22c55e; }
+        .status-light.active { background-color: #0f9488 !important; box-shadow: 0 0 10px rgba(15, 148, 136, .35); }
         .waypoint-item.selected { background-color: #eff6ff; border-left: 4px solid #3b82f6; }
     </style>
 </head>
@@ -89,18 +94,23 @@
 
             <section id="workflow-bar" class="workflow-bar nav-workflow">
                 <button class="workflow-step active" data-step="data" onclick="setWorkflowStep('data')">
+                    <span>1</span>
                     <strong>项目</strong>
                 </button>
                 <button class="workflow-step" data-step="model" onclick="setWorkflowStep('model')">
+                    <span>2</span>
                     <strong>点云建模</strong>
                 </button>
                 <button class="workflow-step" data-step="waypoint" onclick="setWorkflowStep('waypoint')">
+                    <span>3</span>
                     <strong>航点规划</strong>
                 </button>
                 <button class="workflow-step" data-step="route" onclick="setWorkflowStep('route')">
+                    <span>4</span>
                     <strong>航线生成</strong>
                 </button>
                 <button class="workflow-step" data-step="compare" onclick="setWorkflowStep('compare')">
+                    <span>5</span>
                     <strong>多算法对比</strong>
                 </button>
             </section>
@@ -212,12 +222,12 @@
 
             </div>
 
-            <div class="flex items-center gap-4">
-                <button onclick="ui.taskCenter.toggle()" class="nav-btn px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg flex gap-2 items-center transition font-bold" title="任务中心">
-                    <i class="ph-bold ph-list-checks text-blue-600"></i> 任务中心
+            <div class="nav-actions flex items-center gap-4">
+                <button onclick="ui.taskCenter.toggle()" class="nav-btn task-center-trigger px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg flex gap-2 items-center transition font-bold" title="任务中心">
+                    <i class="ph-bold ph-list-checks"></i> 任务中心
                     <span id="task-count" class="bg-blue-600 text-white text-[10px] px-1.5 py-0.5 rounded-full hidden">0</span>
                 </button>
-                <button onclick="ui.sidebar.toggle()" class="p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition" title="切换检查器">
+                <button onclick="ui.sidebar.toggle()" class="nav-icon-button p-2 text-slate-400 hover:bg-slate-100 rounded-lg transition" title="切换检查器" aria-label="切换对象检查器">
                     <i class="ph-bold ph-sidebar-simple text-xl"></i>
                 </button>
                 <div class="h-6 w-px bg-slate-200"></div>
@@ -235,9 +245,6 @@
                         <button onclick="logout()" class="block w-full text-left p-2.5 hover:bg-red-50 rounded-lg transition text-red-500">退出登录</button>
                     </div>
                 </div>
-                <button onclick="logout()" class="p-2 text-red-400 hover:bg-red-50 rounded-lg transition" title="退出">
-                    <i class="ph-bold ph-sign-out text-lg"></i>
-                </button>
             </div>
         </nav>
 
@@ -312,25 +319,43 @@
 
             <!-- 3D Viewport -->
             <main id="canvas-container" class="flex-1 bg-slate-200 relative cursor-crosshair scene-viewport">
-                <div class="viewport-hud pointer-events-none">
-                    <strong>智能巡视窗口</strong>
+                <button class="viewport-hud scene-context-button" onclick="openProjectPanel('point_cloud', { toggle: true })" aria-label="打开场景数据">
+                    <i class="ph-bold ph-cube"></i>
+                    <span>
+                        <strong>场景</strong>
+                        <small id="scene-context-name">未加载数据</small>
+                    </span>
+                    <i class="ph-bold ph-caret-down"></i>
+                </button>
+                <div id="viewport-empty-state" class="viewport-empty-state">
+                    <div class="empty-state-mark" aria-hidden="true">
+                        <i class="ph-duotone ph-cube-transparent"></i>
+                    </div>
+                    <h2>尚未加载巡检数据</h2>
+                    <p>上传点云或打开已有数据，开始构建巡检任务</p>
+                    <div class="empty-state-actions">
+                        <button class="primary" onclick="ui.modals.openUpload('point_cloud')">
+                            <i class="ph-bold ph-upload-simple"></i>
+                            上传点云
+                        </button>
+                        <button onclick="openProjectPanel('point_cloud')">
+                            <i class="ph-bold ph-folder-open"></i>
+                            打开已有数据
+                        </button>
+                    </div>
                 </div>
-                <div class="scene-toolbar">
-                    <button onclick="resetSceneView()" title="复位视角"><i class="ph-bold ph-crosshair"></i></button>
-                    <button onclick="setScenePointSize(0.75)" title="点更细"><i class="ph-bold ph-minus"></i></button>
-                    <button onclick="setScenePointSize(1.25)" title="点更粗"><i class="ph-bold ph-plus"></i></button>
-                    <button onclick="setSceneOpacity(0.55)" title="半透明显示"><i class="ph-bold ph-eye"></i></button>
-                    <button onclick="setSceneOpacity(1)" title="恢复不透明"><i class="ph-bold ph-eye-slash"></i></button>
+                <div class="scene-toolbar" role="toolbar" aria-label="三维场景工具">
+                    <button onclick="resetSceneView()" data-tooltip="复位视角" aria-label="复位视角"><i class="ph-bold ph-crosshair"></i></button>
+                    <button onclick="setScenePointSize(0.75)" data-tooltip="减小点尺寸" aria-label="减小点尺寸"><i class="ph-bold ph-minus"></i></button>
+                    <button onclick="setScenePointSize(1.25)" data-tooltip="增大点尺寸" aria-label="增大点尺寸"><i class="ph-bold ph-plus"></i></button>
+                    <button onclick="setSceneOpacity(0.55)" data-tooltip="半透明显示" aria-label="半透明显示"><i class="ph-bold ph-circle-half"></i></button>
+                    <button onclick="setSceneOpacity(1)" data-tooltip="恢复不透明" aria-label="恢复不透明"><i class="ph-bold ph-cube"></i></button>
                 </div>
-                <div class="semantic-legend">
+                <div id="semantic-legend" class="semantic-legend hidden">
                     <span><i class="legend-dot tower"></i>塔身</span>
                     <span><i class="legend-dot insulator"></i>绝缘子</span>
                     <span><i class="legend-dot wire"></i>导/地线</span>
                     <span><i class="legend-dot route"></i>航线/航点</span>
-                </div>
-                <div class="viewport-radar pointer-events-none" aria-hidden="true">
-                    <span></span>
-                    <span></span>
                 </div>
                 <!-- Progress Bar -->
                 <div id="progress-modal" class="hidden absolute top-6 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur p-4 rounded-xl shadow-xl w-72 flex-col gap-2 border border-white/50 z-40">
@@ -344,11 +369,11 @@
                 </div>
 
                 <!-- Toggle Sidebar Hint (Visible when sidebar collapsed) -->
-                <button id="layer-expand-btn" onclick="toggleLayerPanel()" class="absolute top-4 left-4 bg-white/90 p-2 rounded-lg shadow border hover:bg-white z-30" title="展开图层树">
-                    <i class="ph-bold ph-layers text-xl text-slate-600"></i>
+                <button id="layer-expand-btn" onclick="toggleLayerPanel()" class="panel-edge-toggle layer-edge-toggle absolute z-30" title="展开图层树" aria-label="展开图层树">
+                    <i class="ph-bold ph-caret-right"></i>
                 </button>
-                <button id="sidebar-expand-btn" onclick="ui.sidebar.toggle()" class="absolute top-4 right-4 bg-white/90 p-2 rounded-lg shadow border hover:bg-white z-30" title="展开对象检查器">
-                    <i class="ph-bold ph-sidebar-simple text-xl text-slate-600"></i>
+                <button id="sidebar-expand-btn" onclick="ui.sidebar.toggle()" class="panel-edge-toggle inspector-edge-toggle absolute z-30" title="展开对象检查器" aria-label="展开对象检查器">
+                    <i class="ph-bold ph-caret-left"></i>
                 </button>
             </main>
 
@@ -642,7 +667,7 @@
         }
     </script>
 
-    <script type="module" src="/static/js/app.js?v=3.9"></script>
+    <script type="module" src="/static/js/app.js?v=4.1"></script>
 </body>
 </html>
 

@@ -1,4 +1,4 @@
-import { state, alignCoordinates } from './state.js?v=3.9';
+import { state, alignCoordinates } from './state.js?v=4.0';
 
 let scene, camera, renderer, controls, raycaster, mouse, viewportContainer;
 let animationId;
@@ -57,8 +57,8 @@ export function init3D() {
     const size = getContainerSize(container);
 
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf3faf6);
-    scene.fog = new THREE.FogExp2(0xf3faf6, 0.0016);
+    scene.background = new THREE.Color(0xf7f9fc);
+    scene.fog = new THREE.FogExp2(0xf7f9fc, 0.00145);
 
     camera = new THREE.PerspectiveCamera(60, size.width / size.height, 0.1, 20000);
     camera.position.set(100, 100, 100);
@@ -82,9 +82,12 @@ export function init3D() {
     dl.position.set(100, 200, 100);
     scene.add(dl);
 
-    // Helpers
-    scene.add(new THREE.GridHelper(500, 50, 0x2aa899, 0xd1ddd8).rotateX(Math.PI/2));
-    scene.add(new THREE.AxesHelper(10));
+    // Keep the empty workspace spatial without overpowering loaded inspection data.
+    const grid = new THREE.GridHelper(500, 50, 0x56aaa6, 0xd9e1e8);
+    grid.rotateX(Math.PI / 2);
+    grid.material.transparent = true;
+    grid.material.opacity = 0.62;
+    scene.add(grid);
 
     // Interaction
     renderer.domElement.addEventListener('pointerdown', onPointerDown);

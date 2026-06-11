@@ -1,7 +1,7 @@
-import { state, resetState } from './state.js?v=3.9';
-import * as API from './api.js?v=3.9';
-import * as Scene from './scene.js?v=3.9';
-import { ui } from './ui.js?v=3.9';
+import { state, resetState } from './state.js?v=4.0';
+import * as API from './api.js?v=4.0';
+import * as Scene from './scene.js?v=4.0';
+import { ui } from './ui.js?v=4.0';
 
 console.log("App initializing...");
 
@@ -179,19 +179,87 @@ function notify(title, message = '', type = 'info') {
     if(ui.log?.add) ui.log.add(title, message, type);
 }
 
+function dialogOptions(options = {}) {
+    return {
+        customClass: {
+            popup: 'ui-dialog'
+        },
+        showClass: {
+            popup: ''
+        },
+        hideClass: {
+            popup: ''
+        },
+        buttonsStyling: false,
+        reverseButtons: true,
+        focusCancel: false,
+        ...options
+    };
+}
+
+async function showAlert(title, message = '', icon = 'info') {
+    if(window.Swal?.fire) {
+        return window.Swal.fire(dialogOptions({
+            title,
+            text: message,
+            icon,
+            confirmButtonText: '知道了'
+        }));
+    }
+    window.alert(message ? `${title}\n${message}` : title);
+    return { isConfirmed: true };
+}
+
+async function confirmAction(title, message, confirmButtonText = '确认') {
+    if(window.Swal?.fire) {
+        const result = await window.Swal.fire(dialogOptions({
+            title,
+            text: message,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText,
+            cancelButtonText: '取消'
+        }));
+        return !!result.isConfirmed;
+    }
+    return window.confirm(message ? `${title}\n${message}` : title);
+}
+
+async function requestFilename(oldName) {
+    if(window.Swal?.fire) {
+        const result = await window.Swal.fire(dialogOptions({
+            title: '重命名文件',
+            text: `原文件：${oldName}`,
+            input: 'text',
+            inputValue: oldName,
+            inputLabel: '请输入包含扩展名的新文件名',
+            inputAttributes: {
+                autocapitalize: 'off',
+                autocomplete: 'off'
+            },
+            showCancelButton: true,
+            confirmButtonText: '保存',
+            cancelButtonText: '取消',
+            inputValidator: (value) => {
+                const nextName = `${value || ''}`.trim();
+                if(!nextName) return '文件名不能为空';
+                if(/[\\/]/.test(nextName)) return '文件名不能包含路径分隔符';
+                return undefined;
+            }
+        }));
+        return result.isConfirmed ? `${result.value || ''}`.trim() : '';
+    }
+    return `${window.prompt(`请输入新的文件名（含扩展名）\n原文件：${oldName}`, oldName) || ''}`.trim();
+}
+
 function openDropdown(id, options = {}) {
     const target = document.getElementById(id);
     const shouldClose = !!options.toggle && target && !target.classList.contains('hidden');
-
-    document.querySelectorAll('.dropdown-menu').forEach((el) => {
-        el.classList.add('hidden');
-    });
-
-    if(target && !shouldClose) {
-        target.classList.remove('hidden');
-        return true;
+    if(shouldClose) {
+        ui.dropdown.closeAll();
+        return false;
     }
-    return false;
+    return target ? ui.dropdown.open(id) : false;
 }
 
 function setProjectTab(tab) {
@@ -427,6 +495,16 @@ if(container) {
 
 // 初始化状态
 resetState();
+ui.workflow.render();
+
+document.addEventListener('pointerdown', (event) => {
+    if(event.target.closest('.dropdown-menu, .workflow-step, .user-menu-trigger, .scene-context-button')) return;
+    ui.dropdown.closeAll();
+});
+
+document.addEventListener('keydown', (event) => {
+    if(event.key === 'Escape') ui.dropdown.closeAll();
+});
 
 // --- 3. 业务逻辑 ---
 
@@ -435,7 +513,7 @@ async function handleAuth() {
     const p = document.getElementById('password').value;
 
     if(typeof API.login !== 'function') {
-        alert("System Error: API.login not loaded. Please refresh.");
+        await showAlert('系统错误', '登录模块未正确加载，请刷新页面后重试。', 'error');
         console.error("API module:", API);
         return;
     }
@@ -466,13 +544,13 @@ async function handleAuth() {
                     setTimeout(() => Scene.resizeRenderer && Scene.resizeRenderer(), 120);
                 });
             }
-        } else alert(res.message);
+        } else await showAlert('登录失败', res.message || '用户名或密码不正确。', 'error');
     } else {
         const res = await API.register(u, p);
         if(res.status === 'success') {
-            alert('注册成功，请登录');
+            await showAlert('注册成功', '请使用新账号登录。', 'success');
             ui.auth.switchTab('login');
-        } else alert(res.message);
+        } else await showAlert('注册失败', res.message || '暂时无法完成注册。', 'error');
     }
 }
 
@@ -762,8 +840,7 @@ function loadProfileFile(category, filename) {
 }
 
 async function handleProfileRename(category, oldName) {
-    const newName = prompt(`请输入新的文件名（含扩展名）
-原文件：${oldName}`, oldName);
+    const newName = await requestFilename(oldName);
     if(!newName || newName === oldName) return;
     const res = await API.renameFile(category, oldName, newName.trim());
     if(res.status !== 'success') {
@@ -786,7 +863,8 @@ async function handleProfileRename(category, oldName) {
 }
 
 async function handleProfileDelete(category, filename) {
-    if(!confirm(`确认删除 ${filename} 吗？`)) return;
+    const confirmed = await confirmAction('删除文件？', `删除后无法恢复：${filename}`, '删除');
+    if(!confirmed) return;
     const res = await API.deleteFile(category, filename);
     if(res.status !== 'success') {
         notify('删除失败', res.message || '删除失败', 'error');
@@ -1649,15 +1727,18 @@ window.addEventListener('waypoint-click', (e) => {
 });
 
 async function handleDelete(cat, name) {
-    if(confirm(`确认删除 ${name}?`)) {
-        await API.deleteFile(cat, name);
-        if(state.user.role === 'admin') ui.admin.renderTable(cat);
+    const confirmed = await confirmAction('删除文件？', `删除后无法恢复：${name}`, '删除');
+    if(!confirmed) return;
+    const res = await API.deleteFile(cat, name);
+    if(res.status !== 'success') {
+        notify('删除失败', res.message || '删除失败', 'error');
+        return;
     }
+    if(state.user.role === 'admin') ui.admin.renderTable(cat);
 }
 
 async function handleRename(cat, oldName) {
-    const newName = prompt(`请输入新的文件名（含扩展名）
-原文件：${oldName}`, oldName);
+    const newName = await requestFilename(oldName);
     if(!newName || newName === oldName) return;
 
     const res = await API.renameFile(cat, oldName, newName);
