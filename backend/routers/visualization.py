@@ -32,7 +32,13 @@ async def get_pointcloud(filename: str, username: str = Depends(get_current_user
     if not point_cloud:
         return {"status": "error", "message": "File not found"}
     try:
-        return {"status": "success", "data": read_las_for_vis(str(point_cloud))}
+        from backend.services.weight_service import get_active_profile
+
+        active_profile = get_active_profile(username, filename)
+        return {
+            "status": "success",
+            "data": read_las_for_vis(str(point_cloud), weight_profile=active_profile),
+        }
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 

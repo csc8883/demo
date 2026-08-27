@@ -1,0 +1,31 @@
+{
+    // VSCode 调试：F5 选择 "🚀 Full Stack (FastAPI + Vite)" 一键启动
+    // 后端带断点调试，前端在终端运行 Vite
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "后端 FastAPI (8000)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}\\main.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "前端 Vite (5174)",
+            "type": "node-terminal",
+            "command": "npm.cmd run dev -- --port 5174",
+            "cwd": "${workspaceFolder}\\frontend"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "🚀 Full Stack (FastAPI + Vite)",
+            "configurations": [
+                "后端 FastAPI (8000)",
+                "前端 Vite (5174)"
+            ]
+        }
+    ]
+}

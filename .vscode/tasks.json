@@ -1,0 +1,51 @@
+{
+    // VSCode 任务：Ctrl+Shift+B 一键并行启动前后端
+    // 注意：Windows 下用 npm.cmd 绕过 PowerShell 执行策略对 npm.ps1 的限制
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "backend: FastAPI (8000)",
+            "type": "shell",
+            "command": "python",
+            "args": ["main.py"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "frontend: Vite (5174)",
+            "type": "shell",
+            "command": "npm.cmd",
+            "args": ["run", "dev", "--", "--port", "5174"],
+            "options": {
+                "cwd": "${workspaceFolder}\\frontend"
+            },
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "🚀 fullstack: 前后端一起跑",
+            "dependsOn": [
+                "backend: FastAPI (8000)",
+                "frontend: Vite (5174)"
+            ],
+            "dependsOrder": "parallel",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
+

@@ -16,6 +16,8 @@ def list_user_files(username: str, category: str) -> List[Dict[str, Any]]:
     files = []
     for file_path in get_user_dir(username, category).iterdir():
         if file_path.is_file() and not file_path.name.startswith("."):
+            if category == "voxel" and "_weight_profile_" in file_path.name:
+                continue
             files.append({
                 "name": file_path.name,
                 "owner": username,

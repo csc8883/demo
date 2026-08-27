@@ -68,16 +68,32 @@ async def get_status(
 async def start_voxel(
     background_tasks: BackgroundTasks,
     pc_filename: str = Form(...),
+    weight_profile_id: Optional[str] = Form(None),
     username: str = Depends(get_current_user),
 ):
     point_cloud = find_user_file(username, "point_cloud", pc_filename)
     if not point_cloud:
         return {"status": "error", "message": "File not found"}
 
+    from backend.services.file_service import find_matching_manual_route
+    from backend.services.weight_service import (
+        expected_output_names,
+        get_active_profile,
+        get_profile_by_id,
+    )
+
+    if weight_profile_id:
+        weight_profile = get_profile_by_id(username, pc_filename, weight_profile_id)
+        if not weight_profile:
+            return {"status": "error", "message": "指定的权重 profile 不存在"}
+        if weight_profile.get("status") != "applied":
+            return {"status": "error", "message": "指定的权重 profile 尚未应用"}
+    else:
+        weight_profile = get_active_profile(username, pc_filename)
+
     task_key = _task_key(username, "voxelize")
     process_status[task_key] = {"progress": 0, "status": "starting"}
 
-    from backend.services.file_service import find_matching_manual_route
     manual_route_path = str(find_matching_manual_route(username, point_cloud.stem) or "")
 
     background_tasks.add_task(
@@ -87,10 +103,22 @@ async def start_voxel(
             str(get_user_dir(username, "voxel")),
             status_key=task_key,
             manual_route_path=manual_route_path,
+            weight_profile=weight_profile,
         ).run,
         task_key,
     )
-    return {"status": "success"}
+    names = expected_output_names(
+        pc_filename,
+        str(weight_profile.get("profile_id")) if weight_profile else None,
+    )
+    return {
+        "status": "success",
+        "data": {
+            **names,
+            "weight_profile_id": weight_profile.get("profile_id") if weight_profile else None,
+            "weighted": weight_profile is not None,
+        },
+    }
 
 
 @router.post("/api/process/rl")

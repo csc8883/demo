@@ -22,6 +22,8 @@ async def admin_stats(username: str = Depends(get_current_admin_user)):
         for category in USER_CATEGORIES:
             for file_path in get_user_dir(u, category).iterdir():
                 if file_path.is_file():
+                    if category == "voxel" and "_weight_profile_" in file_path.name:
+                        continue
                     size = file_path.stat().st_size
                     file_counts[category] += 1
                     disk_usage[u] += size / 1024 / 1024

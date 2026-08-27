@@ -28,6 +28,8 @@ USER_DATA_DIR = BASE_DIR / "userdata"
 SYSTEM_FILE = BASE_DIR / "users.json"
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATE_DIR = BASE_DIR
+FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
+POINTCLOUD_LOD_DIR = USER_DATA_DIR / "pointcloud_lod"
 LOG_DIR = BASE_DIR / "logs"
 
 USER_CATEGORIES: List[str] = ["point_cloud", "manual_route", "algorithm_route", "voxel", "waypoint"]

@@ -193,6 +193,8 @@ class UserManager:
             folder = get_user_dir(username, category)
             for file_path in folder.iterdir():
                 if file_path.is_file() and not file_path.name.startswith("."):
+                    if category == "voxel" and "_weight_profile_" in file_path.name:
+                        continue
                     files.append({
                         "name": file_path.name,
                         "owner": username,

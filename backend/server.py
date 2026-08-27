@@ -9,20 +9,22 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from config import (
+    FRONTEND_DIST_DIR,
     LOG_DIR,
+    POINTCLOUD_LOD_DIR,
     STATIC_DIR,
-    TEMPLATE_DIR,
     USER_DATA_DIR,
 )
 
 
 LOG_DIR.mkdir(exist_ok=True)
 USER_DATA_DIR.mkdir(exist_ok=True)
+POINTCLOUD_LOD_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,9 +50,13 @@ def create_app() -> FastAPI:
     )
 
     # 静态文件
+    app.mount("/static/lod", StaticFiles(directory=str(POINTCLOUD_LOD_DIR), check_dir=False), name="pointcloud-lod")
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-    templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(FRONTEND_DIST_DIR / "assets"), check_dir=False),
+        name="frontend-assets",
+    )
 
     # 初始化规划器注册表
     from backend.services.processing_service import _init_planner_registry
@@ -64,17 +70,21 @@ def create_app() -> FastAPI:
         export,
         files,
         planners,
+        pointcloud_lod,
         processing,
         routes,
         users,
         visualization,
+        weights,
         ws,
     )
     app.include_router(auth.router)
     app.include_router(users.router)
     app.include_router(files.router)
     app.include_router(planners.router)
+    app.include_router(pointcloud_lod.router)
     app.include_router(visualization.router)
+    app.include_router(weights.router)
     app.include_router(processing.router)
     app.include_router(routes.router)
     app.include_router(compare.router)
@@ -82,9 +92,34 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(ws.router)
 
-    # 唯一前端 — 根路径渲染 index.html
+    # 唯一前端入口：生产模式只服务 Vite build，避免回退到旧 static/js 页面。
+    def frontend_entry_response(request: Request):
+        frontend_index = FRONTEND_DIST_DIR / "index.html"
+        if frontend_index.exists():
+            return FileResponse(
+                frontend_index,
+                headers={"Cache-Control": "no-store"},
+            )
+        return HTMLResponse(
+            """
+            <!doctype html>
+            <meta charset="utf-8">
+            <title>Frontend build missing</title>
+            <body style="font-family:system-ui;padding:32px;line-height:1.6">
+              <h1>React/Vite 前端尚未构建</h1>
+              <p>请先在 <code>frontend</code> 目录执行 <code>npm install</code> 和 <code>npm run build</code>，然后重新启动 FastAPI。</p>
+              <p>开发模式可同时运行 FastAPI 与 <code>npm run dev</code>。</p>
+            </body>
+            """,
+            status_code=503,
+        )
+
     @app.get("/")
     async def index(request: Request):
-        return templates.TemplateResponse(request, "index.html")
+        return frontend_entry_response(request)
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(request: Request, full_path: str):
+        return frontend_entry_response(request)
 
     return app

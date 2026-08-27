@@ -1,0 +1,30 @@
+{
+  "name": "power-grid-inspection-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test tests/pointCloudLayerController.test.js tests/semanticStyles.test.js"
+  },
+  "dependencies": {
+    "@floating-ui/dom": "^1.7.6",
+    "@phosphor-icons/web": "^2.1.2",
+    "chart.js": "^4.5.0",
+    "gsap": "^3.13.0",
+    "potree-core": "^2.0.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "sweetalert2": "^11.26.25",
+    "three": "0.128.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "vite": "^5.4.21"
+  }
+}

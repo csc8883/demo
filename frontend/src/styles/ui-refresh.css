@@ -1,0 +1,793 @@
+:root {
+    --ui-bg: #f5f8fa;
+    --ui-surface: #ffffff;
+    --ui-surface-soft: #f8fafb;
+    --ui-canvas: #f7f9fc;
+    --ui-text: #17233a;
+    --ui-text-secondary: #5e6b82;
+    --ui-text-muted: #8995a8;
+    --ui-border: #dce3eb;
+    --ui-border-strong: #cbd5e1;
+    --ui-primary: #0f9488;
+    --ui-primary-hover: #0b7f76;
+    --ui-primary-soft: #e8f7f5;
+    --ui-danger: #dc4c4c;
+    --ui-warning: #d79028;
+    --ui-shadow-sm: 0 2px 8px rgba(31, 48, 71, .06);
+    --ui-shadow-md: 0 12px 32px rgba(31, 48, 71, .12);
+    --ui-shadow-lg: 0 24px 64px rgba(31, 48, 71, .16);
+    --ui-radius-sm: 8px;
+    --ui-radius-md: 10px;
+    --ui-radius-lg: 14px;
+    --ui-control-height: 40px;
+}
+
+#user-app {
+    color: var(--ui-text);
+    background: var(--ui-bg);
+    font-family: Inter, "Noto Sans SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+
+#user-app::before {
+    background: none;
+    animation: none;
+}
+
+#user-app button,
+#user-app input,
+#user-app select {
+    font: inherit;
+}
+
+#user-app button:focus-visible,
+#user-app input:focus-visible,
+#user-app select:focus-visible {
+    outline: 3px solid rgba(15, 148, 136, .2) !important;
+    outline-offset: 2px;
+}
+
+#user-app .app-nav {
+    position: relative;
+    z-index: 100;
+    min-height: 72px;
+    height: 72px;
+    padding: 0 28px;
+    gap: 22px;
+    border-color: var(--ui-border);
+    background: rgba(255, 255, 255, .98);
+    box-shadow: 0 1px 0 rgba(31, 48, 71, .03);
+}
+
+#user-app .app-nav > .font-bold {
+    min-width: 270px;
+    gap: 12px;
+    color: var(--ui-text);
+    font-size: 18px;
+    font-weight: 750;
+}
+
+#user-app .nav-brand-mark {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    color: #fff;
+    background: linear-gradient(145deg, #0f9488 0%, #177f86 100%);
+    box-shadow: 0 8px 20px rgba(15, 148, 136, .2);
+}
+
+#user-app .nav-workflow {
+    flex: 1 1 auto;
+    max-width: 970px;
+    min-width: 530px;
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(96px, 1fr)) !important;
+    gap: 12px;
+    padding: 0;
+}
+
+#user-app .nav-workflow .workflow-step {
+    min-width: 0 !important;
+    min-height: 44px;
+    display: flex !important;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 14px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-md);
+    background: var(--ui-surface);
+    color: #344158;
+    box-shadow: none;
+    transition: border-color .16s ease, background .16s ease, color .16s ease, box-shadow .16s ease;
+}
+
+#user-app .nav-workflow .workflow-step:hover {
+    border-color: #b8c7d4;
+    background: var(--ui-surface-soft);
+}
+
+#user-app .nav-workflow .workflow-step span,
+#user-app .nav-workflow .workflow-step.active span,
+#user-app .nav-workflow .workflow-step.ready span {
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    display: grid !important;
+    place-items: center;
+    border: 1px solid var(--ui-border-strong);
+    border-radius: 50%;
+    background: #fff;
+    color: #5f6d83;
+    font-size: 12px;
+    font-weight: 750;
+}
+
+#user-app .nav-workflow .workflow-step strong {
+    display: block !important;
+    min-width: 0;
+    color: inherit;
+    font-size: 14px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#user-app .nav-workflow .workflow-step.active {
+    border-color: var(--ui-primary);
+    background: var(--ui-primary) !important;
+    color: #fff;
+    box-shadow: 0 8px 18px rgba(15, 148, 136, .19) !important;
+}
+
+#user-app .nav-workflow .workflow-step.active span {
+    border-color: rgba(255, 255, 255, .25);
+    background: rgba(255, 255, 255, .15);
+    color: #fff;
+}
+
+#user-app .nav-workflow .workflow-step.active strong {
+    color: #fff;
+}
+
+#user-app .nav-workflow .workflow-step.ready:not(.active) {
+    border-color: #b8dcd7;
+    background: #fbfefd;
+}
+
+#user-app .nav-workflow .workflow-step.ready:not(.active) span {
+    border-color: #acd7d2;
+    background: var(--ui-primary-soft);
+    color: var(--ui-primary);
+}
+
+#user-app .nav-actions {
+    flex: 0 0 auto;
+    gap: 12px;
+}
+
+#user-app .task-center-trigger,
+#user-app .nav-icon-button,
+#user-app .user-menu-trigger {
+    min-height: var(--ui-control-height);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-md);
+    background: #fff;
+    color: #3b4960;
+    box-shadow: none;
+}
+
+#user-app .task-center-trigger {
+    padding: 0 14px;
+    font-size: 13px;
+}
+
+#user-app .task-center-trigger i {
+    color: var(--ui-primary) !important;
+    font-size: 17px;
+}
+
+#user-app .nav-icon-button {
+    width: var(--ui-control-height);
+    display: grid;
+    place-items: center;
+    padding: 0;
+}
+
+#user-app .task-center-trigger:hover,
+#user-app .nav-icon-button:hover,
+#user-app .user-menu-trigger:hover {
+    border-color: #b8c7d4;
+    background: var(--ui-surface-soft);
+}
+
+#user-app .user-menu-trigger {
+    padding: 4px 10px 4px 5px;
+    gap: 9px;
+}
+
+#user-app .user-menu-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    background: var(--ui-primary);
+    box-shadow: none;
+}
+
+#user-app .user-menu-trigger .text-right {
+    text-align: left;
+}
+
+#user-app .workspace-body {
+    background: var(--ui-canvas);
+}
+
+#user-app .scene-viewport {
+    cursor: default;
+    background: var(--ui-canvas) !important;
+}
+
+#user-app .scene-viewport::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 1px rgba(203, 213, 225, .5);
+}
+
+#user-app .scene-context-button {
+    position: absolute;
+    top: 22px;
+    left: 22px;
+    z-index: 25;
+    min-width: 150px;
+    min-height: 56px;
+    display: grid;
+    grid-template-columns: 28px 1fr 16px;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 12px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-md);
+    background: rgba(255, 255, 255, .96);
+    color: var(--ui-text);
+    text-align: left;
+    box-shadow: var(--ui-shadow-sm);
+    backdrop-filter: none;
+}
+
+#user-app .scene-context-button > i:first-child {
+    color: var(--ui-primary);
+    font-size: 22px;
+}
+
+#user-app .scene-context-button > i:last-child {
+    color: var(--ui-text-muted);
+    font-size: 13px;
+}
+
+#user-app .scene-context-button span {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+#user-app .scene-context-button strong {
+    color: var(--ui-text);
+    font-size: 14px;
+    font-weight: 750;
+}
+
+#user-app .scene-context-button small {
+    max-width: 115px;
+    margin-top: 1px;
+    overflow: hidden;
+    color: var(--ui-text-muted);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#user-app .scene-context-button:hover {
+    border-color: #b8c7d4;
+    background: #fff;
+}
+
+#user-app .viewport-empty-state {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 20;
+    width: min(520px, calc(100% - 120px));
+    min-height: 330px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 44px 48px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-lg);
+    background: rgba(255, 255, 255, .97);
+    box-shadow: var(--ui-shadow-lg);
+    transform: translate(-50%, -50%);
+}
+
+#user-app .viewport-empty-state.hidden {
+    display: none;
+}
+
+#user-app .empty-state-mark {
+    width: 74px;
+    height: 74px;
+    display: grid;
+    place-items: center;
+    margin-bottom: 20px;
+    border: 1px dashed #9dcfca;
+    border-radius: 18px;
+    color: var(--ui-primary);
+    background: linear-gradient(145deg, #f5fcfb, #e7f7f5);
+}
+
+#user-app .empty-state-mark i {
+    font-size: 40px;
+}
+
+#user-app .viewport-empty-state h2 {
+    margin: 0;
+    color: var(--ui-text);
+    font-size: 23px;
+    font-weight: 760;
+    line-height: 1.35;
+}
+
+#user-app .viewport-empty-state p {
+    margin: 12px 0 28px;
+    color: var(--ui-text-secondary);
+    font-size: 14px;
+    line-height: 1.6;
+    text-align: center;
+}
+
+#user-app .empty-state-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+#user-app .empty-state-actions button {
+    min-width: 150px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    padding: 0 18px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-sm);
+    background: #fff;
+    color: #3c4a60;
+    font-size: 14px;
+    font-weight: 700;
+    transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+
+#user-app .empty-state-actions button:hover {
+    border-color: #b5c4d1;
+    background: var(--ui-surface-soft);
+}
+
+#user-app .empty-state-actions button.primary {
+    border-color: var(--ui-primary);
+    background: var(--ui-primary);
+    color: #fff;
+    box-shadow: 0 8px 18px rgba(15, 148, 136, .18);
+}
+
+#user-app .empty-state-actions button.primary:hover {
+    border-color: var(--ui-primary-hover);
+    background: var(--ui-primary-hover);
+}
+
+#user-app .scene-toolbar {
+    top: 22px;
+    right: 22px;
+    z-index: 25;
+    display: flex;
+    gap: 0;
+    padding: 0 8px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-md);
+    background: rgba(255, 255, 255, .96);
+    box-shadow: var(--ui-shadow-sm);
+    backdrop-filter: none;
+}
+
+#user-app .scene-toolbar button {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    border: 0;
+    border-right: 1px solid #e8edf2;
+    border-radius: 0;
+    background: transparent;
+    color: #405069;
+    box-shadow: none;
+}
+
+#user-app .scene-toolbar button:last-child {
+    border-right: 0;
+}
+
+#user-app .scene-toolbar button:hover {
+    color: var(--ui-primary);
+    background: #f3faf9;
+}
+
+#user-app .scene-toolbar button::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    z-index: 80;
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: #243247;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -3px);
+    transition: opacity .14s ease, transform .14s ease;
+}
+
+#user-app .scene-toolbar button:hover::after,
+#user-app .scene-toolbar button:focus-visible::after {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+#user-app .semantic-legend {
+    right: auto;
+    bottom: 20px;
+    left: 20px;
+    z-index: 25;
+    gap: 16px;
+    padding: 11px 15px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-sm);
+    background: rgba(255, 255, 255, .96);
+    color: #48556b;
+    box-shadow: var(--ui-shadow-sm);
+    backdrop-filter: none;
+}
+
+#user-app .semantic-legend.hidden {
+    display: none;
+}
+
+#user-app .semantic-legend span {
+    font-size: 12px;
+    font-weight: 650;
+}
+
+#user-app .panel-edge-toggle {
+    top: 50%;
+    width: 30px;
+    height: 68px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    background: rgba(255, 255, 255, .97);
+    color: #4d5c72;
+    box-shadow: var(--ui-shadow-sm);
+    transform: translateY(-50%);
+}
+
+#user-app .panel-edge-toggle:hover {
+    color: var(--ui-primary);
+    background: #fff;
+}
+
+#user-app .layer-edge-toggle {
+    left: 0 !important;
+    border-left: 0;
+    border-radius: 0 8px 8px 0;
+}
+
+#user-app .inspector-edge-toggle {
+    right: 0 !important;
+    left: auto !important;
+    border-right: 0;
+    border-radius: 8px 0 0 8px;
+}
+
+#user-app .workspace-panel {
+    border-color: var(--ui-border) !important;
+    background: #fff;
+    box-shadow: var(--ui-shadow-md) !important;
+}
+
+#user-app .workspace-body .layer-tree-panel.collapsed,
+#user-app .workspace-body #sidebar-panel.collapsed {
+    display: none !important;
+}
+
+#user-app .panel-title,
+#user-app #sidebar-panel > div:first-child {
+    min-height: 68px;
+    border-color: var(--ui-border);
+    background: var(--ui-surface-soft) !important;
+}
+
+#user-app .panel-title p,
+#user-app #sidebar-panel > div:first-child p,
+#user-app .task-center-head p {
+    display: none;
+}
+
+#user-app .panel-title h2,
+#user-app #sidebar-panel > div:first-child span,
+#user-app .task-center-head h3 {
+    color: var(--ui-text);
+    font-size: 14px;
+    font-weight: 750;
+}
+
+#user-app .inspector-tabs {
+    border-color: var(--ui-border);
+    background: #fff;
+}
+
+#user-app .inspector-tabs button {
+    color: var(--ui-text-secondary);
+}
+
+#user-app .inspector-tabs button.active {
+    background: transparent !important;
+    color: var(--ui-primary);
+    box-shadow: inset 0 -2px 0 var(--ui-primary) !important;
+}
+
+#user-app #status-led-panel {
+    right: 20px !important;
+    bottom: 20px;
+    left: auto !important;
+    z-index: 24;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-sm);
+    background: rgba(255, 255, 255, .96);
+    box-shadow: var(--ui-shadow-sm);
+    backdrop-filter: none;
+}
+
+#user-app #status-led-panel.hidden {
+    display: none;
+}
+
+#user-app .legacy-action-menus {
+    position: static;
+    width: 0;
+    height: 0;
+}
+
+#user-app .legacy-action-menus .dropdown-menu,
+#user-app #dd-user {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    z-index: 120;
+    margin: 0 !important;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-lg);
+    background: #fff;
+    color: var(--ui-text);
+    box-shadow: var(--ui-shadow-md);
+}
+
+#user-app .dropdown-menu button {
+    border-radius: var(--ui-radius-sm);
+}
+
+#user-app .project-tab.active {
+    border-color: var(--ui-primary);
+    background: var(--ui-primary) !important;
+    color: #fff;
+    box-shadow: none !important;
+}
+
+#user-app .project-action-btn.blue,
+#user-app .project-action-btn.purple,
+#user-app .project-action-btn.green {
+    border-color: #b9ddd8;
+    background: var(--ui-primary-soft);
+    color: var(--ui-primary-hover);
+}
+
+#user-app #dd-pc button,
+#user-app #dd-calc > button,
+#user-app #dd-manual > div > button,
+#user-app #dd-manual .text-purple-700,
+#user-app #dd-manual .text-purple-600,
+#user-app #dd-manual .text-green-700,
+#user-app #dd-manual .text-green-600,
+#user-app #dd-manual .text-blue-700,
+#user-app #dd-manual .text-blue-600 {
+    color: var(--ui-primary-hover) !important;
+}
+
+#user-app #dd-manual .hover\:bg-purple-50:hover,
+#user-app #dd-manual .hover\:bg-green-50:hover,
+#user-app #dd-manual .hover\:bg-blue-50:hover {
+    background: var(--ui-primary-soft) !important;
+}
+
+#user-app .task-center-panel {
+    top: 84px;
+    right: 24px;
+    width: 360px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-lg);
+    background: #fff;
+    box-shadow: var(--ui-shadow-lg);
+}
+
+#user-app .task-center-head {
+    border-color: var(--ui-border);
+    background: var(--ui-surface-soft);
+}
+
+#user-app .toast-stack {
+    right: 24px;
+    bottom: 24px;
+}
+
+#user-app .toast-item {
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-md);
+    background: #fff;
+    box-shadow: var(--ui-shadow-md);
+}
+
+.swal2-container {
+    font-family: Inter, "Noto Sans SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+}
+
+.swal2-popup.ui-dialog {
+    width: min(440px, calc(100vw - 32px));
+    padding: 28px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-lg);
+    background: #fff;
+    box-shadow: var(--ui-shadow-lg);
+}
+
+.swal2-popup.ui-dialog .swal2-title {
+    padding: 0;
+    color: var(--ui-text);
+    font-size: 20px;
+    font-weight: 760;
+}
+
+.swal2-popup.ui-dialog .swal2-html-container {
+    margin: 12px 0 0;
+    color: var(--ui-text-secondary);
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.swal2-popup.ui-dialog .swal2-actions {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 10px;
+    margin: 24px 0 0;
+}
+
+.swal2-popup.ui-dialog .swal2-confirm,
+.swal2-popup.ui-dialog .swal2-cancel {
+    min-width: 88px;
+    height: 40px;
+    margin: 0;
+    border-radius: var(--ui-radius-sm);
+    font-size: 13px;
+    font-weight: 700;
+    box-shadow: none;
+}
+
+.swal2-popup.ui-dialog .swal2-confirm {
+    background: var(--ui-primary);
+}
+
+.swal2-popup.ui-dialog .swal2-cancel {
+    border: 1px solid var(--ui-border);
+    background: #fff;
+    color: #536177;
+}
+
+.swal2-popup.ui-dialog .swal2-input {
+    height: 44px;
+    margin: 18px 0 0;
+    border: 1px solid var(--ui-border-strong);
+    border-radius: var(--ui-radius-sm);
+    color: var(--ui-text);
+    font-size: 14px;
+    box-shadow: none;
+}
+
+.swal2-popup.ui-dialog .swal2-input:focus {
+    border-color: var(--ui-primary);
+    box-shadow: 0 0 0 3px rgba(15, 148, 136, .14);
+}
+
+@media (max-width: 1500px) {
+    #user-app .app-nav {
+        padding: 0 18px;
+        gap: 14px;
+    }
+
+    #user-app .app-nav > .font-bold {
+        min-width: 225px;
+        font-size: 16px;
+    }
+
+    #user-app .nav-workflow {
+        min-width: 500px;
+        gap: 8px;
+    }
+
+    #user-app .nav-workflow .workflow-step {
+        padding: 0 10px;
+        gap: 7px;
+    }
+
+    #user-app .nav-actions {
+        gap: 8px;
+    }
+}
+
+@media (max-width: 1280px) {
+    #user-app .app-nav > .font-bold {
+        min-width: 44px;
+    }
+
+    #user-app .app-nav > .font-bold > span {
+        display: none;
+    }
+
+    #user-app .nav-workflow {
+        min-width: 470px;
+    }
+
+    #user-app .nav-workflow .workflow-step strong {
+        font-size: 12px;
+    }
+
+    #user-app .task-center-trigger {
+        width: 40px !important;
+        min-width: 40px;
+        padding: 0 !important;
+        justify-content: center;
+        font-size: 0 !important;
+    }
+
+    #user-app .task-center-trigger i {
+        font-size: 18px !important;
+    }
+
+    #user-app .nav-actions > .h-6 {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #user-app *,
+    .swal2-container * {
+        scroll-behavior: auto !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+    }
+}

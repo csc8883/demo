@@ -1,0 +1,1 @@
+﻿ class="flex h-screen w-screen bg-slate-50 overflow-hidden text-slate-800"

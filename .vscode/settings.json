@@ -1,0 +1,9 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "workbench.externalUriOpeners": {
+        "127.0.0.1:5174": "default",
+        "127.0.0.1:8000": "default",
+        "localhost": "default"
+    }
+}

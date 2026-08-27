@@ -2232,7 +2232,12 @@ def _merge_clusters_by_proximity(
     return merged, merge_count
 
 
-def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_size: float) -> Dict[str, object]:
+def build_semantic_surface_model(
+    points: np.ndarray,
+    classes: np.ndarray,
+    voxel_size: float,
+    weight_profile: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     all_points = np.asarray(points, dtype=float)
     all_classes = np.asarray(classes, dtype=int)
     structure_mask = np.isin(all_classes.astype(int), list(STRUCTURE_LABELS))
@@ -2240,6 +2245,21 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
     classes = np.asarray(all_classes[structure_mask], dtype=int)
     if len(points) == 0:
         raise ValueError("没有可用于体素建模的杆塔/绝缘子点")
+    weight_profile_enabled = bool(weight_profile and weight_profile.get("groups"))
+    profile_overlap_count = 0
+    if weight_profile_enabled:
+        from backend.services.weight_service import annotate_target_points
+
+        profile_selected, profile_annotations, profile_overlap_count = annotate_target_points(
+            points,
+            classes,
+            weight_profile,
+        )
+        if not np.any(profile_selected):
+            raise ValueError("启用的权重 profile 未匹配到任何杆塔或绝缘子目标")
+    else:
+        profile_selected = np.ones(len(points), dtype=bool)
+        profile_annotations = [None] * len(points)
 
     wire_points, _ = _voxel_centroids(
         all_points[all_classes == WIRE_LABEL],
@@ -2355,7 +2375,7 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
         }.get(semantic, (4.0, 16.0, 70.0))
 
     voxel_map: Dict[Tuple[int, int, int], Dict[str, object]] = {}
-    for pt, lbl in zip(points, classes):
+    for point_index, (pt, lbl) in enumerate(zip(points, classes)):
         key = tuple(int(math.floor((pt[i] - min_bound[i]) / voxel_size)) for i in range(3))
         if key not in voxel_map:
             voxel_map[key] = {
@@ -2363,11 +2383,26 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
                 "count": 0,
                 "labels": {},
                 "grid_index": key,
+                "selected_count": 0,
+                "weight_annotation": None,
+                "weight_annotation_rank": -1,
             }
         cell = voxel_map[key]
         cell["sum"] += pt
         cell["count"] += 1
         cell["labels"][int(lbl)] = cell["labels"].get(int(lbl), 0) + 1
+        if bool(profile_selected[point_index]):
+            cell["selected_count"] += 1
+            annotation = profile_annotations[point_index]
+            if annotation:
+                level_rank = {"normal": 1, "needed": 2, "important": 3}.get(
+                    str(annotation.get("weight_level") or "normal"),
+                    1,
+                )
+                annotation_rank = level_rank * 1_000_000_000 + int(annotation.get("revision_seq") or 0)
+                if annotation_rank >= int(cell.get("weight_annotation_rank", -1)):
+                    cell["weight_annotation"] = annotation
+                    cell["weight_annotation_rank"] = annotation_rank
 
     occupied = set(voxel_map.keys())
     surface_keys = []
@@ -2665,6 +2700,24 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
     radial_distances = np.linalg.norm(points[:, :2] - local_center[:2], axis=1)
     edge_radius_threshold = float(np.percentile(radial_distances, 92)) if len(radial_distances) else 0.0
 
+    def apply_profile_annotation(
+        record: Dict[str, object],
+        annotation: Optional[Dict[str, object]],
+    ) -> Dict[str, object]:
+        if not weight_profile_enabled or not annotation:
+            return record
+        multiplier = float(annotation.get("weight_multiplier", 1.0) or 1.0)
+        record["weight"] = round(float(record.get("weight", 1.0)) * multiplier, 6)
+        for key in (
+            "weight_level",
+            "weight_group_id",
+            "weight_group_name",
+            "group_color",
+            "required_view_directions",
+        ):
+            record[key] = annotation.get(key)
+        return record
+
     display_voxels: List[Dict[str, object]] = []
     for key, cell in surface_voxels.items():
         coord = np.asarray(cell["coord"], dtype=float)
@@ -2697,8 +2750,11 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
         area = estimate_patch_area(int(cell["count"]), voxel_size, semantic)
         insulator_instance_id = insulator_voxel_instance_map.get(key)
         is_planning = semantic in TARGET_SEMANTICS or bool(insulator_instance_id is not None)
+        annotation = cell.get("weight_annotation")
+        if weight_profile_enabled:
+            is_planning = bool(is_planning and int(cell.get("selected_count", 0)) > 0 and annotation)
 
-        display_voxels.append({
+        display_record = {
             "coord": coord.tolist(),
             "type": 3 if semantic == "insulator" else (2 if semantic == "tower_edge" else 1),
             "label": label,
@@ -2725,7 +2781,8 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
             "source": "tower_layer_sector" if category == "tower" else "insulator",
             "point_count": int(cell["count"]),
             "grid_index": list(key),
-        })
+        }
+        display_voxels.append(apply_profile_annotation(display_record, annotation))
 
     for label, semantic, category, records in (
         (WIRE_LABEL, "wire", "wire", wire_points),
@@ -2745,7 +2802,62 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
                 "normal_hint": [0.0, 0.0, 1.0],
                 "point_count": 1,
             })
+    if weight_profile_enabled and attention_targets:
+        from backend.services.weight_service import annotate_target_points
+
+        attention_coords = np.asarray(
+            [record.get("coord", local_center) for record in attention_targets],
+            dtype=float,
+        )
+        attention_labels = np.asarray(
+            [int(record.get("label", TOWER_LABEL)) for record in attention_targets],
+            dtype=int,
+        )
+        attention_selected, attention_annotations, _ = annotate_target_points(
+            attention_coords,
+            attention_labels,
+            weight_profile,
+        )
+        filtered_attention: List[Dict[str, object]] = []
+        for record, selected, annotation in zip(
+            attention_targets,
+            attention_selected,
+            attention_annotations,
+        ):
+            if not selected or not annotation:
+                continue
+            filtered_attention.append(apply_profile_annotation(record, annotation))
+        attention_targets = filtered_attention
     display_voxels.extend(attention_targets)
+
+    instance_weight_annotations: Dict[int, Dict[str, object]] = {}
+    for voxel in display_voxels:
+        instance_id = voxel.get("insulator_instance_id")
+        if instance_id is None or not voxel.get("is_planning_target"):
+            continue
+        annotation = {
+            key: voxel.get(key)
+            for key in (
+                "weight_level",
+                "weight_group_id",
+                "weight_group_name",
+                "group_color",
+                "required_view_directions",
+            )
+        }
+        annotation["weight_multiplier"] = (
+            float(voxel.get("weight", POWER_MODEL_CONFIG["insulator_weight"]))
+            / max(float(POWER_MODEL_CONFIG["insulator_weight"]), 1e-9)
+        )
+        instance_weight_annotations[int(instance_id)] = annotation
+
+    if weight_profile_enabled:
+        for instance in insulator_instances:
+            instance_id = int(instance.get("id", -1))
+            annotation = instance_weight_annotations.get(instance_id)
+            instance["active_for_weight_profile"] = annotation is not None
+            if annotation:
+                instance.update(annotation)
 
     target_cells: List[Dict[str, object]] = []
     n_insulator_segments = int(POWER_MODEL_CONFIG["insulator_segments"])
@@ -2770,7 +2882,7 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
                         math.cos(angle) * outward + math.sin(angle) * radial_perp
                     )
                     cell_center = seg_center + normal_dir * ins_radius
-                    target_cells.append({
+                    target_record = {
                         "coord": cell_center.tolist(),
                         "pos": cell_center.tolist(),
                         "label": INSULATOR_LABEL,
@@ -2796,7 +2908,10 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
                         "around_id": ring,
                         "point_count": 1,
                         "source": "insulator_axis_ring",
-                    })
+                    }
+                    annotation = instance_weight_annotations.get(instance_id)
+                    if not weight_profile_enabled or annotation:
+                        target_cells.append(apply_profile_annotation(target_record, annotation))
         except Exception:
             continue
 
@@ -2810,6 +2925,8 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
     for voxel in display_voxels:
         semantic = str(voxel["semantic"])
         if semantic in NON_TARGET_SEMANTICS and semantic not in ATTENTION_SEMANTICS:
+            continue
+        if not bool(voxel.get("is_planning_target", voxel.get("is_target", True))):
             continue
         coord = np.asarray(voxel["coord"], dtype=float)
         if semantic == "insulator":
@@ -2872,8 +2989,18 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
         layer_ids = [member.get("layer_id") for member in members if member.get("layer_id") is not None]
         sector_ids = [member.get("sector_id") for member in members if member.get("sector_id") is not None]
         src = members[0].get("source", "legacy") if members else "legacy"
+        winning_member = max(
+            members,
+            key=lambda member: (
+                {"normal": 1, "needed": 2, "important": 3}.get(
+                    str(member.get("weight_level") or "normal"),
+                    0,
+                ),
+                int(member.get("required_view_directions") or 0),
+            ),
+        )
         patch_id_counter += 1
-        voxels.append({
+        patch_record = {
             "id": patch_id_counter,
             "coord": np.mean(coords, axis=0).tolist(),
             "pos": np.mean(coords, axis=0).tolist(),
@@ -2902,7 +3029,17 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
             "source": src,
             "point_count": point_count,
             "support_count": int(len(members)),
-        })
+        }
+        for key in (
+            "weight_level",
+            "weight_group_id",
+            "weight_group_name",
+            "group_color",
+            "required_view_directions",
+        ):
+            if winning_member.get(key) is not None:
+                patch_record[key] = winning_member.get(key)
+        voxels.append(patch_record)
         patch_counts[semantic] = patch_counts.get(semantic, 0) + 1
 
     if target_cells:
@@ -3010,6 +3147,37 @@ def build_semantic_surface_model(points: np.ndarray, classes: np.ndarray, voxel_
             "candidate_no_fly_filter_enabled": True,
             "conductor_no_fly_source": "point_cloud" if conductor_no_fly_volumes else None,
             "patch_scale": estimate_patch_scale(display_voxels, local_center, tower_height),
+            "active_weight_profile": (
+                {
+                    "profile_id": weight_profile.get("profile_id"),
+                    "name": weight_profile.get("name"),
+                    "status": weight_profile.get("status"),
+                    "stats": weight_profile.get("stats", {}),
+                    "policy": weight_profile.get("policy", {}),
+                    "groups": [
+                        {
+                            key: group.get(key)
+                            for key in (
+                                "group_id",
+                                "name",
+                                "level",
+                                "color",
+                                "enabled",
+                                "point_count",
+                                "estimated_voxel_count",
+                                "estimated_target_cell_count",
+                                "required_view_directions",
+                                "weight_multiplier",
+                            )
+                        }
+                        for group in weight_profile.get("groups", [])
+                    ],
+                }
+                if weight_profile_enabled
+                else None
+            ),
+            "weight_profile_enabled": weight_profile_enabled,
+            "weight_profile_overlap_count": int(profile_overlap_count),
             **safety_meta,
             "warnings": safety_warnings,
         },
@@ -3020,6 +3188,8 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
     target_records = list(surface_model["voxels"]) + list(surface_model.get("attention_targets", []))
     local_center = np.asarray(surface_model["local_center"], dtype=float)
     meta = dict(surface_model.get("meta", {}))
+    weighted_mode = bool(meta.get("weight_profile_enabled"))
+    weight_angle_shortfalls: List[Dict[str, object]] = []
     z_min = float(meta.get("z_min", local_center[2] - 5.0))
     z_max = float(meta.get("z_max", local_center[2] + 5.0))
     tower_height = max(float(meta.get("tower_height", z_max - z_min)), 1.0)
@@ -3197,6 +3367,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         instance_id: Optional[int] = None,
         layer_id: Optional[int] = None,
         sector_id: Optional[int] = None,
+        weight_level: Optional[str] = None,
+        weight_group_id: Optional[str] = None,
+        weight_group_name: Optional[str] = None,
+        group_color: Optional[str] = None,
+        required_view_directions: Optional[int] = None,
         action_name: str = "photo",
         focal_level: Optional[str] = None,
     ):
@@ -3361,6 +3536,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             "layer_id": layer_id,
             "sector_id": sector_id,
             "weight": target_weight if target_weight is not None else SEMANTIC_WEIGHTS.get(semantic_focus, 1.0),
+            "weight_level": weight_level,
+            "weight_group_id": weight_group_id,
+            "weight_group_name": weight_group_name,
+            "group_color": group_color,
+            "required_view_directions": required_view_directions,
             "required_gsd": None,
             "required_resolution": round(float(req_resolution), 6),
             "max_view_angle_deg": max_view_angle_deg if max_view_angle_deg is not None else INCIDENCE_THRESHOLDS.get(semantic_focus, 65.0),
@@ -3382,7 +3562,12 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             cand["aim_type"] = aim_type
         candidates.append(cand)
 
-    def add_no_fly_exterior_candidates(target: Sequence[float], semantic: str, cluster_id: str) -> None:
+    def add_no_fly_exterior_candidates(
+        target: Sequence[float],
+        semantic: str,
+        cluster_id: str,
+        target_record: Optional[Dict[str, object]] = None,
+    ) -> None:
         """Add viewpoints just outside the lateral no-fly boundary for high-voltage targets."""
         if semantic not in ("insulator", "conductor_insulator_connection", "wire_insulator_connection", "insulator_tower_side_connection", "ground_wire_tower_connection"):
             return
@@ -3402,6 +3587,18 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                     target_arr,
                     semantic,
                     cluster_id=cluster_id,
+                    target_id=(target_record or {}).get("id"),
+                    target_weight=(target_record or {}).get("weight"),
+                    required_resolution=(target_record or {}).get("required_resolution"),
+                    max_view_angle_deg=(target_record or {}).get("max_view_angle_deg"),
+                    instance_id=(target_record or {}).get("instance_id"),
+                    layer_id=(target_record or {}).get("layer_id"),
+                    sector_id=(target_record or {}).get("sector_id"),
+                    weight_level=(target_record or {}).get("weight_level"),
+                    weight_group_id=(target_record or {}).get("weight_group_id"),
+                    weight_group_name=(target_record or {}).get("weight_group_name"),
+                    group_color=(target_record or {}).get("group_color"),
+                    required_view_directions=(target_record or {}).get("required_view_directions"),
                     source="no_fly_exterior",
                 )
 
@@ -3427,7 +3624,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
     overview_azimuths = [0, 120, 240]  # 3 distinct directions
     overview_heights = [z_min + 0.50 * tower_height, z_min + 0.70 * tower_height]
     overview_count = 0
-    for ov_az in overview_azimuths:
+    for ov_az in ([] if weighted_mode else overview_azimuths):
         ov_angle = math.radians(ov_az)
         for ov_z_target in overview_heights:
             if overview_count >= overview_profile["max_candidates"]:
@@ -3444,7 +3641,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
 
     # ── Fallback overview: if safety filtered too many, add more distant directions ──
     overview_survivors = sum(1 for c in candidates if c.get("AimType") == "tower_overview")
-    if overview_survivors < 3:
+    if overview_survivors < 3 and not weighted_mode:
         fallback_az = [60, 180, 300]
         fallback_dist = 55.0
         fb_h_d = fallback_dist * math.cos(overview_pitch_rad)
@@ -3470,7 +3667,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
     top_h_dist = top_dist * math.cos(top_pitch_rad)
     top_h_delta = top_dist * math.sin(top_pitch_rad)
     top_azimuths = range(0, 360, 60)  # 6 directions
-    for tp_az in top_azimuths:
+    for tp_az in ([] if weighted_mode else top_azimuths):
         tp_angle = math.radians(tp_az)
         tp_pos = np.array([
             local_center[0] + top_h_dist * math.cos(tp_angle),
@@ -3486,7 +3683,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
     body_h_dist = body_dist * math.cos(body_pitch_rad)
     body_h_delta = body_dist * math.sin(body_pitch_rad)
     body_heights = [z_min + 0.35 * tower_height, z_min + 0.55 * tower_height, z_min + 0.75 * tower_height]
-    for bh in body_heights:
+    for bh in ([] if weighted_mode else body_heights):
         for ba in range(0, 360, 90):  # 4 per height
             ba_rad = math.radians(ba)
             bp = np.array([
@@ -3497,7 +3694,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             add_candidate(bp, tower_focus, "tower_body", aim_type="tower_body", source="aimtype_tower_body")
 
     # --- Determine insulator mode ---
-    insulator_instances_list = list(meta.get("insulator_instances", []) or [])
+    insulator_instances_list = [
+        instance
+        for instance in list(meta.get("insulator_instances", []) or [])
+        if not weighted_mode or bool(instance.get("active_for_weight_profile"))
+    ]
     insulator_mode = "instance_based" if insulator_instances_list else "legacy_voxel_based"
     legacy_insulator_voxel_candidates_skipped = bool(insulator_instances_list)
     insulator_instance_centers = [
@@ -3537,6 +3738,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                 "required_resolution": [],
                 "max_view_angle_deg": [],
                 "target_ids": [],
+                "weight_levels": [],
+                "weight_group_ids": [],
+                "weight_group_names": [],
+                "group_colors": [],
+                "required_view_directions": [],
             }
         patch = tower_patches[patch_key]
         patch["coords"].append(np.asarray(record.get("coord", local_center), dtype=float))
@@ -3545,6 +3751,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         patch["max_view_angle_deg"].append(float(record.get("max_view_angle_deg",
                                             INCIDENCE_THRESHOLDS.get(semantic, 65.0))))
         patch["target_ids"].append(record.get("id"))
+        patch["weight_levels"].append(record.get("weight_level"))
+        patch["weight_group_ids"].append(record.get("weight_group_id"))
+        patch["weight_group_names"].append(record.get("weight_group_name"))
+        patch["group_colors"].append(record.get("group_color"))
+        patch["required_view_directions"].append(int(record.get("required_view_directions") or 0))
 
     # --- Tower patch candidates: 1-2 per layer-sector, AIMTYPE_VIEW_PROFILE driven ---
     tower_raw_by_source: Dict[str, int] = {}
@@ -3559,7 +3770,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         profile = AIMTYPE_VIEW_PROFILE.get(aim_key)
         if profile is None:
             continue
-        max_per_patch = int(profile.get("max_candidates_per_layer_sector", 3))
+        required_directions = max(patch.get("required_view_directions") or [0])
+        max_per_patch = max(
+            int(profile.get("max_candidates_per_layer_sector", 3)),
+            int(required_directions),
+        )
         coords = np.asarray(patch["coords"], dtype=float)
         weights = np.asarray(patch["weights"], dtype=float)
         req_res = float(np.mean(np.asarray(patch["required_resolution"], dtype=float))) if patch.get("required_resolution") else REQUIRED_RESOLUTION.get(semantic, 0.7)
@@ -3578,6 +3793,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         pref_dist = float(profile.get("preferred_distance_m", 55.0))
         pref_pitch = profile.get("preferred_pitch_deg")
 
+        candidate_count_before = len(candidates)
         for ci in range(max_per_patch):
             # Gentle angle variation for multi-candidate patches
             if max_per_patch > 1 and ci > 0:
@@ -3610,7 +3826,23 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                           required_resolution=req_res,
                           layer_id=int(patch["layer_id"]),
                           sector_id=int(patch["sector_id"]),
+                          weight_level=next((value for value in patch["weight_levels"] if value), None),
+                          weight_group_id=next((value for value in patch["weight_group_ids"] if value), None),
+                          weight_group_name=next((value for value in patch["weight_group_names"] if value), None),
+                          group_color=next((value for value in patch["group_colors"] if value), None),
+                          required_view_directions=required_directions or None,
                           source="tower_patch_aimtype")
+        generated_count = len(candidates) - candidate_count_before
+        if required_directions and generated_count < required_directions:
+            weight_angle_shortfalls.append({
+                "target_type": "tower_patch",
+                "semantic": semantic,
+                "layer_id": int(patch["layer_id"]),
+                "sector_id": int(patch["sector_id"]),
+                "required": int(required_directions),
+                "generated": int(generated_count),
+                "reason": "safe_candidate_directions_insufficient",
+            })
         tower_raw_by_source[semantic] = tower_raw_by_source.get(semantic, 0) + 1
 
     # --- Legacy insulator voxel generation (fallback, only when no insulator_instances) ---
@@ -3639,9 +3871,14 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                           required_resolution=record.get("required_resolution"),
                           max_view_angle_deg=record.get("max_view_angle_deg"),
                           instance_id=record.get("insulator_instance_id", record.get("instance_id")),
+                          weight_level=record.get("weight_level"),
+                          weight_group_id=record.get("weight_group_id"),
+                          weight_group_name=record.get("weight_group_name"),
+                          group_color=record.get("group_color"),
+                          required_view_directions=record.get("required_view_directions"),
                           source="legacy_insulator_voxel")
             if conductor_no_fly_volumes:
-                add_no_fly_exterior_candidates(target, "insulator", cluster_id)
+                add_no_fly_exterior_candidates(target, "insulator", cluster_id, record)
         tower_raw_by_source["insulator_legacy_voxel"] = len(legacy_insulator_records)
 
     # --- Attention / connection candidates: ≤3 per target, AIMTYPE_VIEW_PROFILE driven ---
@@ -3693,7 +3930,6 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         profile = AIMTYPE_VIEW_PROFILE.get(aim_key)
         if profile is None or not records:
             continue
-        max_per_target = int(profile.get("max_candidates_per_target", 3))
         pref_dist = float(profile.get("preferred_distance_m", 5.0))
         pref_pitch = profile.get("preferred_pitch_deg")
         if pref_pitch is not None:
@@ -3708,6 +3944,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         _use_angle_sweep = semantic in ("conductor_insulator_connection", "wire_insulator_connection", "insulator_tower_side_connection", "ground_wire_tower_connection")
         att_count = 0
         for record in records:
+            required_directions = int(record.get("required_view_directions") or 0)
+            max_per_target = max(
+                int(profile.get("max_candidates_per_target", 3)),
+                required_directions,
+            )
             target = np.asarray(record.get("coord", local_center), dtype=float)
             outward = target[:2] - local_center[:2]
             out_norm = float(np.linalg.norm(outward))
@@ -3752,6 +3993,11 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                               instance_id=record.get("instance_id"),
                               layer_id=record.get("layer_id"),
                               sector_id=record.get("sector_id"),
+                              weight_level=record.get("weight_level"),
+                              weight_group_id=record.get("weight_group_id"),
+                              weight_group_name=record.get("weight_group_name"),
+                              group_color=record.get("group_color"),
+                              required_view_directions=required_directions or None,
                               source="connection_aimtype")
                 if len(candidates) > count_before:
                     candidates_for_this_target += 1
@@ -3788,13 +4034,33 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                                       instance_id=record.get("instance_id"),
                                       layer_id=record.get("layer_id"),
                                       sector_id=record.get("sector_id"),
+                                      weight_level=record.get("weight_level"),
+                                      weight_group_id=record.get("weight_group_id"),
+                                      weight_group_name=record.get("weight_group_name"),
+                                      group_color=record.get("group_color"),
+                                      required_view_directions=required_directions or None,
                                       source="connection_aimtype")
                         if len(candidates) > count_before:
                             candidates_for_this_target += 1
 
             # Fallback: if no candidates passed safety, try no_fly_exterior
             if candidates_for_this_target == 0 and _use_angle_sweep:
-                add_no_fly_exterior_candidates(target, semantic, cluster_id)
+                add_no_fly_exterior_candidates(target, semantic, cluster_id, record)
+                candidates_for_this_target = sum(
+                    1
+                    for candidate in candidates
+                    if candidate.get("target_cluster_id") == cluster_id
+                    and candidate.get("semantic_focus") == semantic
+                )
+            if required_directions and candidates_for_this_target < required_directions:
+                weight_angle_shortfalls.append({
+                    "target_type": "attention_target",
+                    "semantic": semantic,
+                    "target_id": record.get("id"),
+                    "required": required_directions,
+                    "generated": int(candidates_for_this_target),
+                    "reason": "safe_candidate_directions_insufficient",
+                })
             att_count += 1
         tower_raw_by_source[semantic] = att_count
 
@@ -3819,6 +4085,12 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
             if frag_type in ("noise_fragment", "excluded_from_candidates"):
                 continue
             instance_id = int(inst.get("id", inst_idx) or inst_idx)
+            required_directions = int(inst.get("required_view_directions") or 0)
+            instance_direction_names = (
+                direction_names[:required_directions]
+                if required_directions
+                else direction_names
+            )
             inst_center = np.asarray(inst.get("center", local_center), dtype=float)
             inst_axis = safe_normalize(np.asarray(inst.get("axis", [0.0, 0.0, 1.0]), dtype=float))
             outward_2d = safe_normalize(inst_center[:2] - local_center[:2])
@@ -3836,7 +4108,9 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                 "outward_minus_z": safe_normalize(np.array([outward_2d[0], outward_2d[1], -0.3])),
             }
             inst_candidates = 0
-            for dir_name in direction_names:
+            successful_directions: set[str] = set()
+            for dir_name in instance_direction_names:
+                direction_count_before = inst_candidates
                 base_dir = safe_normalize(dir_map.get(dir_name, np.array([outward_2d[0], outward_2d[1], 0.0])))
                 for distance in distances:
                     for height_offset in height_offsets:
@@ -3860,11 +4134,17 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                             count_before = len(candidates)
                             add_candidate(pos, target, "insulator",
                                           aim_type="insulator_string",
-                                          target_weight=POWER_MODEL_CONFIG["insulator_weight"],
+                                          target_weight=float(POWER_MODEL_CONFIG["insulator_weight"])
+                                          * float(inst.get("weight_multiplier", 1.0) or 1.0),
                                           required_resolution=REQUIRED_RESOLUTION.get("insulator", 1.5),
                                           max_view_angle_deg=POWER_MODEL_CONFIG["insulator_max_view_angle_deg"],
                                           instance_id=instance_id,
                                           layer_id=None, sector_id=None,
+                                          weight_level=inst.get("weight_level"),
+                                          weight_group_id=inst.get("weight_group_id"),
+                                          weight_group_name=inst.get("weight_group_name"),
+                                          group_color=inst.get("group_color"),
+                                          required_view_directions=required_directions or None,
                                           source="insulator_instance_multi_distance")
                             if len(candidates) > count_before:
                                 inst_candidates += 1
@@ -3874,10 +4154,20 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
                         break
                 if inst_candidates >= max_per_inst:
                     break
+                if inst_candidates > direction_count_before:
+                    successful_directions.add(dir_name)
+            if required_directions and len(successful_directions) < required_directions:
+                weight_angle_shortfalls.append({
+                    "target_type": "insulator_instance",
+                    "instance_id": instance_id,
+                    "required": required_directions,
+                    "generated": int(len(successful_directions)),
+                    "reason": "safe_candidate_directions_insufficient",
+                })
             inst_count += 1
         tower_raw_by_source["insulator_instance"] = inst_count
 
-    if manual_route_path:
+    if manual_route_path and not weighted_mode:
         for waypoint in parse_manual_route(str(manual_route_path)):
             aim_type = _decode_text(waypoint.get("aim_type"), "")
             semantic, priority = classify_manual_aim_type(aim_type)
@@ -3970,6 +4260,7 @@ def generate_candidate_views(surface_model: Dict[str, object], manual_route_path
         },
         "final_by_source": final_by_source,
     }
+    meta["weight_angle_shortfalls"] = weight_angle_shortfalls
     surface_model["meta"] = meta
 
     return candidates

@@ -1,7 +1,10 @@
-import { state, resetState } from './state.js?v=4.3';
-import * as API from './api.js?v=4.3';
-import * as Scene from './scene.js?v=4.3';
-import { ui } from './ui.js?v=4.3';
+import Chart from 'chart.js/auto';
+import { state, resetState } from './state.js';
+import * as API from './api.js';
+import * as Scene from './scene.js';
+import { ui } from './ui.js';
+import { getTheme } from './theme.js';
+import { LOD_CLASSIFICATION_PALETTE } from './renderers/semanticStyles.js';
 
 console.log("App initializing...");
 
@@ -16,6 +19,7 @@ window.runVoxelization = runVoxelization;
 window.runRL = runRL;
 window.openAlgorithmMenu = openAlgorithmMenu;
 window.renderPlanningPointCloudPicker = renderPlanningPointCloudPicker;
+window.renderPlannerWeightImpactSummary = renderPlannerWeightImpactSummary;
 
 // 修复 toggleLayer: 对应 ui.js 中的 window.toggleLayer(cat, id, this)
 window.toggleLayer = (cat, id, el) => {
@@ -70,11 +74,17 @@ window.focusLayer = focusLayer;
 window.resetSceneView = resetSceneView;
 window.setScenePointSize = setScenePointSize;
 window.setSceneOpacity = setSceneOpacity;
+window.getPointCloudRendererInfo = (id = state.activeScene) => (
+    id ? Scene.getPointCloudRendererInfo?.(id) : null
+);
+window.setPotreeRenderOptions = (options = {}) => Scene.setPotreeRenderOptions?.(options);
 window.openWeightCanvas = openWeightCanvas;
 window.closeWeightCanvas = closeWeightCanvas;
 window.setWeightInteractionMode = setWeightInteractionMode;
 window.setWeightTool = setWeightTool;
 window.setWeightSelectionMode = setWeightSelectionMode;
+window.toggleWeightSampleOverlay = toggleWeightSampleOverlay;
+window.setWeightDisplayMode = setWeightDisplayMode;
 window.invertWeightSelection = invertWeightSelection;
 window.clearWeightSelection = clearWeightSelection;
 window.createWeightGroup = createWeightGroup;
@@ -104,6 +114,86 @@ let plannerCatalog = [];
 let activeProjectTab = 'point_cloud';
 let projectPanelRequestId = 0;
 let weightRevisionSeq = 0;
+const lodPollTimers = new Map();
+const pointCloudLodHints = new Map();
+
+function normalizePotreeDisplayMode(mode) {
+    return ['classification', 'rgb', 'plain'].includes(mode) ? mode : 'classification';
+}
+
+function potreeOverlayRole(colorMode, weighted = false) {
+    if(colorMode === 'plain') {
+        return weighted ? 'potree-weight-plain' : 'potree-plain';
+    }
+    if(colorMode === 'rgb') {
+        return weighted ? 'potree-weight-rgb' : 'potree-rgb';
+    }
+    return weighted ? 'potree-weight-classification' : 'potree-classification';
+}
+
+function buildPointCloudLodHints(data = {}, displayMode = null) {
+    const weighted = !!data.weight_profile;
+    const colorMode = normalizePotreeDisplayMode(displayMode || (weighted ? 'rgb' : 'classification'));
+    return {
+        color_mode: colorMode,
+        classification_palette: LOD_CLASSIFICATION_PALETTE,
+        overlay_role: potreeOverlayRole(colorMode, weighted),
+        point_budget: weighted ? 2_200_000 : 1_800_000
+    };
+}
+
+function rememberPointCloudLodHints(filename, data = {}) {
+    if(!filename) return null;
+    const hints = buildPointCloudLodHints(data);
+    pointCloudLodHints.set(filename, hints);
+    Scene.setPointCloudRenderHints?.(filename, hints);
+    return hints;
+}
+
+function lodOptionsForVisualData(data = {}) {
+    const profileId = data.weight_profile?.profile_id || data.profile_id;
+    return profileId
+        ? { variant: 'active_weight', profile_id: profileId }
+        : {};
+}
+
+function lodPollKey(filename, options = {}) {
+    return [
+        filename,
+        options.variant || 'base',
+        options.profile_id || options.profileId || ''
+    ].join('::');
+}
+
+function applyChartTheme(theme = getTheme()) {
+    const dark = theme === 'dark';
+    const textColor = dark ? '#cbd5e1' : '#475569';
+    const gridColor = dark ? 'rgba(148, 163, 184, .18)' : 'rgba(148, 163, 184, .28)';
+    Chart.defaults.color = textColor;
+    Chart.defaults.borderColor = gridColor;
+    [compareMainChart, compareRouteChart].forEach((chart) => {
+        if(!chart) return;
+        if(chart.options.plugins?.legend?.labels) {
+            chart.options.plugins.legend.labels.color = textColor;
+        }
+        Object.values(chart.options.scales || {}).forEach((scale) => {
+            scale.grid = { ...(scale.grid || {}), color: gridColor };
+            scale.ticks = { ...(scale.ticks || {}), color: textColor };
+            scale.title = { ...(scale.title || {}), color: textColor };
+        });
+        chart.update('none');
+    });
+}
+
+function applyRuntimeTheme(theme = getTheme()) {
+    Scene.setTheme?.(theme);
+    applyChartTheme(theme);
+}
+
+window.addEventListener('app-theme-change', (event) => {
+    applyRuntimeTheme(event.detail?.theme || getTheme());
+});
+applyRuntimeTheme(getTheme());
 
 const projectTabConfig = {
     point_cloud: {
@@ -502,6 +592,124 @@ function showOperationResult(title, detail, type = 'success') {
     ui.taskCenter.render();
 }
 
+async function preparePointCloudLod(filename, visualData = null) {
+    try {
+        if(visualData) rememberPointCloudLodHints(filename, visualData);
+        const lodOptions = visualData ? lodOptionsForVisualData(visualData) : {};
+        const lodRequest = Scene.beginPointCloudLodRequest?.(filename, {
+            variant: lodOptions.variant || 'base',
+            profileId: lodOptions.profile_id || null
+        });
+        const response = await API.preparePointCloudLod(filename, lodOptions);
+        if(response.status !== 'success') {
+            ui.log.add('LOD 准备失败', response.message || filename, 'warning');
+            return null;
+        }
+        return await handlePointCloudLodStatus(filename, response.data || {}, {
+            poll: true,
+            lodOptions,
+            lodRequest
+        });
+    } catch(error) {
+        ui.log.add('LOD 状态读取失败', error.message || filename, 'warning');
+        return null;
+    }
+}
+
+function pointCloudLodMethodName(renderHints = {}) {
+    if(renderHints.overlay_role === 'potree-weight-rgb') {
+        return 'Potree LOD 权重 RGB 底图已启用';
+    }
+    if(renderHints.color_mode === 'plain') {
+        return 'Potree LOD 纯净底图已启用';
+    }
+    if(renderHints.color_mode === 'classification') {
+        return 'Potree LOD 分类底图已启用';
+    }
+    return 'Potree LOD RGB 底图已启用';
+}
+
+async function handlePointCloudLodStatus(filename, data, options = {}) {
+    const status = data.status || 'unknown';
+    const renderHints = pointCloudLodHints.get(filename) || {};
+    const lodOptions = options.lodOptions || {
+        variant: data.variant,
+        profile_id: data.weight_profile_id
+    };
+    const lodRequest = options.lodRequest || null;
+    if(lodRequest && !Scene.isPointCloudLodRequestCurrent?.(filename, lodRequest)) {
+        clearLodPolling(filename, lodOptions);
+        return { ...data, ignored: true, reason: 'stale_lod_request' };
+    }
+    const details = {
+        ready: 'LOD 缓存已就绪，正在切换 Potree 底图',
+        queued: 'LOD 转换已加入后台任务',
+        running: 'LOD 转换正在后台执行',
+        converter_missing: '未检测到 PotreeConverter，继续使用当前采样预览',
+        not_prepared: 'LOD 缓存尚未生成，继续使用当前采样预览',
+        failed: data.message || 'LOD 转换失败'
+    };
+    ui.log.add('LOD 状态', details[status] || status, status === 'failed' ? 'error' : 'info');
+    if(status === 'ready' && data.manifest_url) {
+        clearLodPolling(filename, lodOptions);
+        try {
+            const renderResult = await Scene.renderPointCloudLod(
+                { ...data, render_hints: renderHints },
+                filename,
+                lodRequest
+            );
+            if(renderResult?.status === 'ignored_stale_request') {
+                return { ...data, ignored: true, reason: 'stale_lod_request' };
+            }
+            ui.layers.updateMeta('pointcloud', filename, {
+                methodName: pointCloudLodMethodName(renderHints)
+            });
+            notify('LOD 底图已启用', filename, 'success');
+        } catch(error) {
+            ui.log.add('Potree 加载失败', error.message || filename, 'error');
+            notify('Potree 加载失败', '继续使用当前采样预览', 'warning');
+        }
+    } else if(options.poll && ['queued', 'running', 'not_prepared'].includes(status)) {
+        scheduleLodPolling(filename, lodOptions, lodRequest);
+    }
+    return data;
+}
+
+function clearLodPolling(filename, options = {}) {
+    const key = lodPollKey(filename, options);
+    const existing = lodPollTimers.get(key);
+    if(existing) {
+        clearTimeout(existing.timer);
+        lodPollTimers.delete(key);
+    }
+}
+
+function scheduleLodPolling(filename, options = {}, lodRequest = null) {
+    const key = lodPollKey(filename, options);
+    const existing = lodPollTimers.get(key);
+    const attempts = (existing?.attempts || 0) + 1;
+    clearLodPolling(filename, options);
+    if(attempts > 36) {
+        ui.log.add('LOD 轮询结束', `${filename} 暂未就绪，可稍后重新加载`, 'warning');
+        return;
+    }
+    const timer = setTimeout(async () => {
+        try {
+            const response = await API.fetchPointCloudLodStatus(filename, options);
+            if(response.status === 'success') {
+                await handlePointCloudLodStatus(filename, response.data || {}, {
+                    poll: true,
+                    lodOptions: options,
+                    lodRequest
+                });
+            }
+        } catch(error) {
+            ui.log.add('LOD 轮询失败', error.message || filename, 'warning');
+        }
+    }, attempts < 6 ? 3000 : 8000);
+    lodPollTimers.set(key, { timer, attempts, lodRequest });
+}
+
 function cloneWeightValue(value) {
     return JSON.parse(JSON.stringify(value));
 }
@@ -520,6 +728,192 @@ function weightLevelColor(level) {
 
 function weightDirections(level) {
     return { important: 4, needed: 3, normal: 1 }[level] || 1;
+}
+
+function formatWeightNumber(value) {
+    return Number(value || 0).toLocaleString();
+}
+
+function currentWeightStatus() {
+    const pointCloud = currentWeightPointCloud();
+    return pointCloud ? (state.weightStatuses[pointCloud] || {}) : {};
+}
+
+function hasExactGroupStats(group = {}) {
+    return ['point_count', 'raw_point_count', 'tower_count', 'insulator_count'].some((key) => (
+        Object.prototype.hasOwnProperty.call(group, key)
+    ));
+}
+
+function groupSelectionOperations(group = {}) {
+    return Array.isArray(group.selection_geometry?.operations)
+        ? group.selection_geometry.operations
+        : [];
+}
+
+function summarizeOperationsImpact(operations = []) {
+    if(!operations.length) return null;
+    return Scene.summarizeWeightSelection?.(operations, state.weightEditableData) || null;
+}
+
+function summarizeGroupImpact(group = {}) {
+    if(hasExactGroupStats(group)) {
+        return {
+            exact: true,
+            towerCount: Number(group.tower_count || 0),
+            insulatorCount: Number(group.insulator_count || 0),
+            conductorCount: 0,
+            groundWireCount: 0,
+            targetSelectedSampleCount: Number(group.point_count || 0),
+            safetySelectedSampleCount: 0,
+            estimatedVoxelCount: Number(group.estimated_voxel_count || 0)
+        };
+    }
+    const sample = summarizeOperationsImpact(groupSelectionOperations(group));
+    if(!sample) return null;
+    return {
+        ...sample,
+        exact: false,
+        estimatedVoxelCount: Number(group.estimated_voxel_count || 0)
+    };
+}
+
+function weightImpactStatusLabel() {
+    const status = currentWeightStatus();
+    const sync = status.model_sync || {};
+    if(state.activeWeightProfileId) {
+        if(state.weightDraftState && state.weightDraftState !== '已应用') return '已改动，需重新应用';
+        if(sync.ready_for_waypoints) return '已应用，可生成航点';
+        if(sync.voxel_stale || sync.candidate_stale) return '已应用，模型已过期';
+        return '已应用，需重新栅格化';
+    }
+    if(state.weightDraftState === '已预览') return '已预览，未应用';
+    if(state.weightProfile?.status === 'draft') return '草稿，未影响航点';
+    if(state.weightGroups?.length) return '待应用';
+    return '未应用';
+}
+
+function workflowStepHtml(label, stateName, detail = '') {
+    const className = ['done', 'current', 'warn', 'pending'].includes(stateName) ? stateName : 'pending';
+    return `
+        <span class="weight-impact-step ${className}">
+            <i></i>
+            <strong>${escapeHtml(label)}</strong>
+            ${detail ? `<small>${escapeHtml(detail)}</small>` : ''}
+        </span>`;
+}
+
+function buildWeightImpactWorkflowHtml() {
+    const status = currentWeightStatus();
+    const sync = status.model_sync || {};
+    const temporaryCount = state.weightSelection?.operations?.length || 0;
+    const groupCount = state.weightGroups?.length || 0;
+    const applied = !!state.activeWeightProfileId;
+    const dirtyApplied = applied && state.weightDraftState !== '已应用';
+    const modelReady = !!sync.ready_for_waypoints;
+    const modelNeedsRefresh = applied && (
+        dirtyApplied
+        || sync.voxel_stale
+        || sync.candidate_stale
+        || !sync.voxel_exists
+        || !sync.candidate_exists
+    );
+    return `
+        <div class="weight-impact-flow">
+            ${workflowStepHtml('框选区域', temporaryCount || groupCount ? 'done' : state.weightSelection?.interaction === 'select' ? 'current' : 'pending')}
+            ${workflowStepHtml('创建分组', groupCount ? 'done' : temporaryCount ? 'current' : 'pending')}
+            ${workflowStepHtml('应用权重', applied && !dirtyApplied ? 'done' : groupCount ? 'warn' : 'pending', dirtyApplied ? '已改动' : '')}
+            ${workflowStepHtml('重新栅格化', modelReady ? 'done' : modelNeedsRefresh ? 'warn' : applied ? 'current' : 'pending')}
+            ${workflowStepHtml('生成航点', modelReady && !dirtyApplied ? 'done' : modelNeedsRefresh ? 'warn' : 'pending')}
+        </div>`;
+}
+
+function impactSummaryText(summary, options = {}) {
+    const exact = !!options.exact;
+    const targetCount = Number(summary?.targetSelectedSampleCount || 0);
+    const safetyCount = Number(summary?.safetySelectedSampleCount || 0);
+    const prefix = exact ? '后端精确统计' : '采样预估';
+    if(targetCount > 0) {
+        return `${prefix}：将影响杆塔 ${formatWeightNumber(summary.towerCount)} 点、绝缘子 ${formatWeightNumber(summary.insulatorCount)} 点。`;
+    }
+    if(safetyCount > 0) {
+        return `${prefix}：当前选区主要命中导线 ${formatWeightNumber(summary.conductorCount)} 点、地线 ${formatWeightNumber(summary.groundWireCount)} 点；它们只作为安全约束参考。`;
+    }
+    return `${prefix}：未命中杆塔/绝缘子可赋权点；不会改变航点生成目标。`;
+}
+
+function buildImpactMetricHtml(label, value) {
+    return `
+        <div class="weight-impact-metric">
+            <span>${escapeHtml(label)}</span>
+            <strong>${formatWeightNumber(value)}</strong>
+        </div>`;
+}
+
+function buildImpactGroupsHtml() {
+    if(!state.weightGroups?.length) {
+        return '<div class="weight-impact-empty">尚未创建权重分组。</div>';
+    }
+    return `
+        <div class="weight-impact-group-list">
+            ${state.weightGroups.map((group) => {
+                const impact = summarizeGroupImpact(group) || {};
+                const count = Number(impact.targetSelectedSampleCount || 0);
+                const status = hasExactGroupStats(group) ? '精确' : '预估';
+                return `
+                    <button class="weight-impact-group-chip" style="--group-color:${escapeHtml(group.color || weightLevelColor(group.level))}" onclick="selectWeightGroup('${escapeHtml(group.group_id)}')">
+                        <span class="weight-impact-chip-color"></span>
+                        <span class="weight-impact-chip-main">
+                            <strong>${escapeHtml(group.name || '未命名分组')}</strong>
+                            <small>${weightLevelLabel(group.level)} · ${status} ${formatWeightNumber(count)} 点</small>
+                        </span>
+                    </button>`;
+            }).join('')}
+        </div>`;
+}
+
+function buildWeightImpactPanel(group = null) {
+    const displayNote = state.weightDisplayMode === 'plain'
+        ? '当前为纯净点云显示；统计仍按原始分类标签计算。'
+        : '当前为已分类点云显示；杆塔/绝缘子作为权重航点目标。';
+    const status = currentWeightStatus();
+    const sync = status.model_sync || {};
+    const draftLabel = weightImpactStatusLabel();
+    const temporaryImpact = summarizeOperationsImpact(state.weightSelection?.operations || []);
+    const selectedGroupImpact = group ? summarizeGroupImpact(group) : null;
+    const primaryImpact = selectedGroupImpact || temporaryImpact;
+    const hasTemporary = !!temporaryImpact && !group;
+    const impactText = primaryImpact
+        ? impactSummaryText(primaryImpact, { exact: !!selectedGroupImpact?.exact })
+        : '暂无临时选区；航点生成会使用当前已应用权重。';
+    const modelHint = state.activeWeightProfileId
+        ? sync.ready_for_waypoints
+            ? '加权体素与候选点已同步，可以进入航点生成。'
+            : '权重已应用，但需重新栅格化后才会影响航点生成。'
+        : '草稿或预览不会进入航点生成，必须点击“应用加权模型”。';
+    return `
+        <section class="weight-impact-card">
+            <div class="weight-impact-head">
+                <div>
+                    <small>WAYPOINT IMPACT</small>
+                    <h3>航点生成影响</h3>
+                </div>
+                <span class="weight-impact-state ${state.activeWeightProfileId ? (sync.ready_for_waypoints ? 'ready' : 'warn') : 'draft'}">${escapeHtml(draftLabel)}</span>
+            </div>
+            <p class="weight-impact-message">${escapeHtml(impactText)}</p>
+            <div class="weight-impact-metrics">
+                ${buildImpactMetricHtml('杆塔目标', primaryImpact?.towerCount || state.weightProfile?.stats?.tower_count || 0)}
+                ${buildImpactMetricHtml('绝缘子目标', primaryImpact?.insulatorCount || state.weightProfile?.stats?.insulator_count || 0)}
+                ${buildImpactMetricHtml('导线参考', primaryImpact?.conductorCount || 0)}
+                ${buildImpactMetricHtml('地线参考', primaryImpact?.groundWireCount || 0)}
+            </div>
+            ${buildWeightImpactWorkflowHtml()}
+            <div class="weight-impact-note ${hasTemporary ? 'active' : ''}">
+                ${escapeHtml(displayNote)}
+                <br>${escapeHtml(modelHint)}
+            </div>
+            ${group ? '' : buildImpactGroupsHtml()}
+        </section>`;
 }
 
 function buildWeightProfilePayload() {
@@ -554,6 +948,7 @@ function restoreWeightSnapshot(snapshot) {
 }
 
 function markWeightDirty(label = '未保存') {
+    state.weightDraftState = label;
     const status = document.getElementById('weight-draft-state');
     if(status) status.textContent = label;
 }
@@ -598,7 +993,8 @@ function setWeightModeVisible(visible) {
     if(Scene.setWeightNavigationEnabled) {
         Scene.setWeightNavigationEnabled(visible ? !selecting : true);
     }
-    if(Scene.toggleWorkspaceObjects) Scene.toggleWorkspaceObjects(!visible);
+    if(Scene.toggleWorkspaceObjects) Scene.toggleWorkspaceObjects(!visible, { keepPointCloud: visible });
+    Scene.setVisualizationContext?.({ weightEditing: !!visible });
     if(Scene.resizeRenderer) requestAnimationFrame(() => Scene.resizeRenderer());
 }
 
@@ -635,16 +1031,24 @@ async function openWeightCanvas() {
             selectedGroupId: null
         };
         state.weightHistory = { undo: [], redo: [] };
+        state.weightOverlayVisible = true;
+        if(!['classified', 'plain'].includes(state.weightDisplayMode)) {
+            state.weightDisplayMode = 'classified';
+        }
         weightRevisionSeq = Math.max(
             0,
             ...state.weightGroups.map((group) => Number(group.revision_seq || 0))
         );
         setWeightModeVisible(true);
         Scene.renderWeightEditable(pointsResponse.data, 'weight-editor');
+        Scene.setWeightEditableDisplay?.({
+            visible: state.weightOverlayVisible,
+            mode: state.weightDisplayMode
+        });
         Scene.setWeightView('box3d');
         setWeightInteractionMode('navigate');
-        renderWeightEditor();
         markWeightDirty(state.weightProfile.status === 'applied' ? '已应用' : state.weightProfile.status === 'draft' ? '草稿' : '未保存');
+        renderWeightEditor();
     } catch(error) {
         setWeightModeVisible(false);
         await showAlert('进入权重幕布失败', error.message, 'error');
@@ -667,7 +1071,7 @@ async function closeWeightCanvas() {
     if(pointCloud) {
         const response = await API.fetchVis('pointcloud', new URLSearchParams({ filename: pointCloud }).toString());
         if(response.status === 'success') {
-            Scene.renderPointCloud(response.data, pointCloud);
+            rememberPointCloudLodHints(pointCloud, response.data);
             const profile = response.data.weight_profile;
             ui.layers.updateMeta('pointcloud', pointCloud, {
                 label: profile ? `${pointCloud.replace(/\.[^.]+$/, '')}_已赋权` : pointCloud,
@@ -675,10 +1079,13 @@ async function closeWeightCanvas() {
                     ? `重要 ${profile.stats?.important_groups || 0} · 需要 ${profile.stats?.needed_groups || 0} · 一般 ${profile.stats?.normal_groups || 0}`
                     : pointCloud
             });
+            void preparePointCloudLod(pointCloud, response.data);
         }
         await refreshWeightStatus(pointCloud);
     }
     state.weightEditableData = null;
+    state.weightOverlayVisible = false;
+    state.weightDraftState = '未保存';
 }
 
 function setWeightTool(tool) {
@@ -708,6 +1115,45 @@ function setWeightInteractionMode(mode) {
     if(Scene.setWeightNavigationEnabled) {
         Scene.setWeightNavigationEnabled(!selecting);
     }
+    renderWeightEditor();
+}
+
+function syncWeightDisplayControls() {
+    const sampleToggle = document.getElementById('weight-sample-toggle');
+    if(sampleToggle) {
+        sampleToggle.classList.toggle('active', !!state.weightOverlayVisible);
+        sampleToggle.textContent = state.weightOverlayVisible ? '隐藏采样点' : '显示采样点';
+        sampleToggle.title = state.weightOverlayVisible
+            ? '隐藏用于前端预览的可赋权采样点'
+            : '显示用于前端预览的可赋权采样点';
+    }
+    document.querySelectorAll('[data-weight-display-mode]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.weightDisplayMode === state.weightDisplayMode);
+    });
+}
+
+function applyWeightDisplaySettings() {
+    syncWeightDisplayControls();
+    Scene.setWeightEditableDisplay?.({
+        visible: !!state.weightOverlayVisible,
+        mode: state.weightDisplayMode
+    });
+    Scene.updateWeightColors?.(
+        state.weightGroups,
+        state.weightSelection.selectedGroupId ? [] : state.weightSelection.operations,
+        state.weightSelection.selectedGroupId
+    );
+}
+
+function toggleWeightSampleOverlay() {
+    state.weightOverlayVisible = !state.weightOverlayVisible;
+    applyWeightDisplaySettings();
+}
+
+function setWeightDisplayMode(mode) {
+    if(!['classified', 'plain'].includes(mode)) return;
+    state.weightDisplayMode = mode;
+    applyWeightDisplaySettings();
     renderWeightEditor();
 }
 
@@ -871,6 +1317,7 @@ function renderWeightEditor() {
     const summary = document.getElementById('weight-selection-summary');
     const inspector = document.getElementById('weight-inspector-content');
     if(count) count.textContent = `${state.weightGroups.length}`;
+    syncWeightDisplayControls();
     if(summary) {
         if(state.weightSelection.interaction === 'navigate') {
             summary.textContent = state.weightSelection.tool === 'front_xz'
@@ -940,7 +1387,8 @@ function renderWeightEditor() {
                 </div>
                 <div class="weight-field"><label>BBox</label><input disabled value="${escapeHtml(JSON.stringify(group.bbox || {}))}"></div>
                 <div class="weight-field"><label>备注</label><textarea id="weight-inspector-note">${escapeHtml(group.note || '')}</textarea></div>
-                <button class="weight-primary weight-inspector-save" onclick="saveWeightGroupProperties()">保存分组属性</button>`;
+                <button class="weight-primary weight-inspector-save" onclick="saveWeightGroupProperties()">保存分组属性</button>
+                ${buildWeightImpactPanel(group)}`;
         } else {
             const stats = state.weightProfile?.stats || {};
             inspector.innerHTML = `
@@ -954,9 +1402,14 @@ function renderWeightEditor() {
                     <div class="weight-inspector-stat"><span>需要</span><strong>${state.weightGroups.filter((group) => group.level === 'needed').length}</strong></div>
                     <div class="weight-inspector-stat"><span>一般</span><strong>${state.weightGroups.filter((group) => group.level === 'normal').length}</strong></div>
                     <div class="weight-inspector-stat"><span>状态</span><strong>${state.activeWeightProfileId ? '已应用' : state.weightProfile?.status === 'draft' ? '草稿' : '未应用'}</strong></div>
-                </div>`;
+                </div>
+                ${buildWeightImpactPanel()}`;
         }
     }
+    Scene.setWeightEditableDisplay?.({
+        visible: !!state.weightOverlayVisible,
+        mode: state.weightDisplayMode
+    });
     Scene.updateWeightColors(
         state.weightGroups,
         state.weightSelection.selectedGroupId ? [] : state.weightSelection.operations,
@@ -1020,6 +1473,8 @@ async function applyWeightProfile() {
         state.weightGroups = cloneWeightValue(response.data.groups || []);
         state.activeWeightProfileId = response.data.profile_id;
         const status = await refreshWeightStatus(pointCloud);
+        rememberPointCloudLodHints(pointCloud, { weight_profile: response.data });
+        void preparePointCloudLod(pointCloud, { weight_profile: response.data });
         markWeightDirty('已应用');
         renderWeightEditor();
         updateWeightTrigger(status);
@@ -1131,11 +1586,7 @@ function initializeWeightSelectionOverlay() {
 const container = document.getElementById('canvas-container');
 if(container) {
     try {
-        if(typeof THREE !== 'undefined') {
-            Scene.init3D();
-        } else {
-            console.error("THREE is not defined");
-        }
+        Scene.init3D();
     } catch(e) { console.error("3D Init Error:", e); }
 }
 initializeWeightSelectionOverlay();
@@ -1281,14 +1732,16 @@ function renderPlanningPointCloudPicker() {
     const pointclouds = state.loadedAssets.pointcloud || [];
     if(!pointclouds.length) {
         container.innerHTML = '<div class="text-[11px] text-slate-400 py-2">当前页面还没有加载点云。</div>';
+        void renderPlannerWeightImpactSummary();
         return;
     }
     container.innerHTML = pointclouds.map((item) => `
         <label class="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-50 cursor-pointer">
-            <input type="checkbox" class="planning-pointcloud-option accent-green-600" value="${escapeHtml(item.id)}" checked>
+            <input type="checkbox" class="planning-pointcloud-option accent-green-600" value="${escapeHtml(item.id)}" checked onchange="renderPlannerWeightImpactSummary()">
             <span class="min-w-0 text-xs text-slate-700 truncate" title="${escapeHtml(item.label || item.id)}">${escapeHtml(item.label || item.id)}</span>
         </label>
     `).join('');
+    void renderPlannerWeightImpactSummary();
 }
 
 function getSelectedPlanningPointClouds() {
@@ -1297,9 +1750,94 @@ function getSelectedPlanningPointClouds() {
     return (state.loadedAssets.pointcloud || []).map((item) => item.id);
 }
 
+async function collectWeightModelIssues(pointCloudNames = []) {
+    const issues = [];
+    for(const name of pointCloudNames) {
+        const status = state.weightStatuses[name] || await refreshWeightStatus(name);
+        const sync = status?.model_sync || {};
+        const localDraftForPointCloud = (
+            state.weightProfile?.base_point_cloud === name
+            && state.weightGroups?.length
+            && state.weightDraftState !== '已应用'
+        );
+        if(localDraftForPointCloud) {
+            issues.push({
+                name,
+                status,
+                reason: '权重草稿未应用'
+            });
+            continue;
+        }
+        if(status?.weighted && !sync.ready_for_waypoints) {
+            issues.push({
+                name,
+                status,
+                reason: sync.voxel_stale || sync.candidate_stale
+                    ? '模型过期'
+                    : '缺少加权体素/候选点'
+            });
+        }
+    }
+    return issues;
+}
+
+function plannerWeightRowHtml(name, status = {}) {
+    const sync = status.model_sync || {};
+    const profile = status.active_profile;
+    if(!status.weighted) {
+        const draftGroups = status.latest_draft?.groups?.length || 0;
+        if(draftGroups) {
+            return `
+                <div class="planner-weight-row warn">
+                    <span class="planner-weight-name">${escapeHtml(name)}</span>
+                    <strong>有草稿未应用</strong>
+                    <small>草稿分组 ${formatWeightNumber(draftGroups)} 个；当前航点仍不会使用该草稿</small>
+                </div>`;
+        }
+        return `
+            <div class="planner-weight-row neutral">
+                <span class="planner-weight-name">${escapeHtml(name)}</span>
+                <strong>未应用权重</strong>
+                <small>航点生成使用原始语义模型</small>
+            </div>`;
+    }
+    const stats = profile?.stats || {};
+    const ready = !!sync.ready_for_waypoints;
+    const label = ready ? '权重已同步' : (sync.voxel_stale || sync.candidate_stale ? '需重新栅格化' : '缺少加权模型');
+    return `
+        <div class="planner-weight-row ${ready ? 'ready' : 'warn'}">
+            <span class="planner-weight-name">${escapeHtml(name)}</span>
+            <strong>${escapeHtml(label)}</strong>
+            <small>杆塔 ${formatWeightNumber(stats.tower_count)} · 绝缘子 ${formatWeightNumber(stats.insulator_count)} · 分组 ${formatWeightNumber(profile?.groups?.length || 0)}</small>
+        </div>`;
+}
+
+async function renderPlannerWeightImpactSummary() {
+    const container = document.getElementById('planner-weight-impact-summary');
+    if(!container) return;
+    const selected = getSelectedPlanningPointClouds();
+    if(!selected.length) {
+        container.innerHTML = '<div class="planner-weight-empty">暂无规划点云。</div>';
+        return;
+    }
+    container.innerHTML = '<div class="planner-weight-empty">正在检查权重与模型同步状态...</div>';
+    const rows = [];
+    for(const name of selected) {
+        const status = state.weightStatuses[name] || await refreshWeightStatus(name) || {};
+        rows.push(plannerWeightRowHtml(name, status));
+    }
+    container.innerHTML = `
+        <div class="planner-weight-summary-head">
+            <span>权重影响</span>
+            <small>导线/地线作为安全约束，杆塔/绝缘子作为权重目标</small>
+        </div>
+        ${rows.join('')}`;
+}
+
 function openAlgorithmMenu(options = {}) {
     renderPlanningPointCloudPicker();
     renderPlannerConfig();
+    void renderPlannerWeightImpactSummary();
     openDropdown('dd-calc', options);
 }
 
@@ -1577,6 +2115,7 @@ async function handleFileSelect(cat, filename) {
             const res = await API.fetchVis('pointcloud', new URLSearchParams({ filename }).toString());
             if (res.status === 'success') {
                 ui.layers.clearSceneLayers({ resetCenter: true });
+                rememberPointCloudLodHints(filename, res.data);
                 Scene.renderPointCloud(res.data, filename);
                 ui.layers.add('pointcloud', filename);
                 if(res.data.weight_profile) {
@@ -1587,6 +2126,9 @@ async function handleFileSelect(cat, filename) {
                 }
                 state.activeScene = filename;
                 await refreshWeightStatus(filename);
+                const totalPointCount = res.data.total_point_count ?? res.data.point_count ?? null;
+                const sampledPointCount = res.data.sampled_point_count ?? res.data.points?.length ?? null;
+                const renderHints = pointCloudLodHints.get(filename) || buildPointCloudLodHints(res.data);
                 selectAssetForInspector('pointcloud', filename, {
                     title: filename,
                     description: '已加载点云，可进行体素化和语义建模。',
@@ -1594,11 +2136,14 @@ async function handleFileSelect(cat, filename) {
                     typeLabel: '点云',
                     fields: {
                         文件: filename,
-                        点数: res.data.points?.length || '--',
+                        总点数: totalPointCount ? Number(totalPointCount).toLocaleString() : '--',
+                        预览点数: sampledPointCount ? Number(sampledPointCount).toLocaleString() : '--',
+                        LOD预算: renderHints.point_budget ? Number(renderHints.point_budget).toLocaleString() : '--',
                         语义标签: res.data.labels?.length ? '已提供' : '未提供'
                     }
                 });
                 renderPlanningPointCloudPicker();
+                void preparePointCloudLod(filename, res.data);
                 ui.led.set('pc', true);
                 ui.workflow.setStep('model');
                 ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: `${filename} 已加载到三维视窗` });
@@ -1741,7 +2286,9 @@ async function runVoxelization() {
             detail: item.id,
             success: `${item.id} 体素化完成`
         });
+        await refreshWeightStatus(item.id);
     }
+    void renderPlannerWeightImpactSummary();
     ui.workflow.setStep('waypoint');
     showOperationResult('点云建模完成', `已完成 ${pointclouds.length} 个点云的栅格化。`, 'success');
     updateReadiness();
@@ -1757,6 +2304,12 @@ async function runRL() {
     const missingVoxels = await expectedVoxelMissing(selectedPointClouds);
     if(missingVoxels.length) {
         renderPreflightIssue('缺少体素数据', `未找到 ${missingVoxels.join('、')}，请先执行点云栅格化。`, 'model');
+        return;
+    }
+    const modelIssues = await collectWeightModelIssues(selectedPointClouds);
+    if(modelIssues.length) {
+        const detail = modelIssues.map((issue) => `${issue.name}（${issue.reason}）`).join('、');
+        renderPreflightIssue('权重模型未同步', `${detail}，请先执行点云栅格化，再生成航点。`, 'model');
         return;
     }
 
@@ -2026,6 +2579,7 @@ function renderCompareCharts(items) {
             }
         });
     }
+    applyChartTheme(getTheme());
 }
 
 function renderCompareTable(items) {

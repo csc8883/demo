@@ -5,3 +5,6 @@ __pycache__/
 .env*
 userdata/
 .claude/settings.local.json
+frontend/node_modules/
+frontend/.npm-cache/
+frontend/dist/

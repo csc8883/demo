@@ -26,6 +26,9 @@ export const state = {
         redo: []
     },
     weightEditableData: null,
+    weightOverlayVisible: false,
+    weightDisplayMode: 'classified',
+    weightDraftState: '未保存',
 
     // Track loaded assets for the new "Active Layers" feature
     loadedAssets: {
@@ -76,5 +79,8 @@ export function resetState() {
     };
     state.weightHistory = { undo: [], redo: [] };
     state.weightEditableData = null;
+    state.weightOverlayVisible = false;
+    state.weightDisplayMode = 'classified';
+    state.weightDraftState = '未保存';
     state.loadedAssets = { pointcloud: [], route: [], voxel: [] };
 }

@@ -32,6 +32,27 @@ from .planning_solvers import (
 
 VOXEL_SIZE = 0.10
 DISPLAY_KEY_LABELS = {TOWER_LABEL, INSULATOR_LABEL, GROUND_WIRE_LABEL, WIRE_LABEL}
+CLASSIFICATION_VIS_COLORS = {
+    0: [0.04, 0.50, 0.18],   # conductor / domain wire
+    1: [0.42, 0.48, 0.56],
+    2: [0.48, 0.38, 0.25],
+    3: [0.40, 1.00, 0.60],   # ground wire
+    4: [0.28, 0.62, 0.34],
+    5: [0.18, 0.50, 0.25],
+    6: [0.55, 0.56, 0.58],
+    7: [0.78, 0.48, 0.92],
+    8: [0.10, 0.65, 0.78],
+    9: [0.20, 0.45, 0.85],
+    10: [0.76, 0.55, 0.18],
+    11: [0.72, 0.32, 0.32],
+    12: [0.32, 0.62, 0.72],
+    15: [1.00, 0.52, 0.16],
+    16: [1.00, 0.05, 0.05],  # tower
+    22: [0.05, 0.35, 1.00],  # insulator
+    24: [0.23, 0.51, 0.96],
+    25: [0.96, 0.62, 0.04],
+    26: [0.94, 0.27, 0.27],
+}
 
 process_status: Dict[str, Dict[str, object]] = {
     "voxelize": {"progress": 0, "status": "idle"},
@@ -44,7 +65,7 @@ def update_progress(task: str, progress: int, status: str = "running"):
     process_status[task] = {"progress": int(progress), "status": status}
 
 
-def read_las_for_vis(file_path: str):
+def read_las_for_vis(file_path: str, weight_profile: Optional[Dict[str, object]] = None):
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件不存在: {file_path}")
 
@@ -65,12 +86,11 @@ def read_las_for_vis(file_path: str):
             colors[:, 1] = 0.45 + 0.35 * z_norm
             colors[:, 2] = 0.70 - 0.28 * z_norm
 
-        colors[labels == TOWER_LABEL] = [1.00, 0.05, 0.05]
-        colors[labels == INSULATOR_LABEL] = [0.05, 0.35, 1.00]
-        colors[labels == WIRE_LABEL] = [0.98, 0.84, 0.18]
-        colors[labels == GROUND_WIRE_LABEL] = [0.25, 0.56, 1.00]
+        for label, color in CLASSIFICATION_VIS_COLORS.items():
+            colors[labels == label] = color
 
         center = np.mean(points, axis=0).tolist()
+        total_point_count = int(len(points))
         max_points = 80000
         if len(points) > max_points:
             key_mask = np.isin(labels, list(DISPLAY_KEY_LABELS))
@@ -86,12 +106,65 @@ def read_las_for_vis(file_path: str):
             colors = colors[indices]
             labels = labels[indices]
 
-        return {
+        group_ids: list[Optional[str]] = [None] * len(points)
+        weight_levels: list[Optional[str]] = [None] * len(points)
+        if weight_profile:
+            from backend.services.weight_service import resolve_group_assignments
+
+            colors[:] = [0.035, 0.105, 0.255]
+            target_mask = np.isin(labels, [TOWER_LABEL, INSULATOR_LABEL])
+            target_positions = points[target_mask]
+            target_labels = labels[target_mask]
+            assignments, _, _ = resolve_group_assignments(
+                target_positions,
+                target_labels,
+                weight_profile.get("groups") or [],
+            )
+            target_indices = np.flatnonzero(target_mask)
+            groups = weight_profile.get("groups") or []
+            for target_offset, assignment in enumerate(assignments):
+                if assignment < 0 or assignment >= len(groups):
+                    continue
+                group = groups[int(assignment)]
+                point_index = int(target_indices[target_offset])
+                color = str(group.get("color") or "#3b82f6").lstrip("#")
+                if len(color) == 6:
+                    try:
+                        colors[point_index] = [
+                            int(color[0:2], 16) / 255.0,
+                            int(color[2:4], 16) / 255.0,
+                            int(color[4:6], 16) / 255.0,
+                        ]
+                    except ValueError:
+                        pass
+                group_ids[point_index] = str(group.get("group_id") or "")
+                weight_levels[point_index] = str(group.get("level") or "normal")
+
+        payload = {
             "points": points.tolist(),
             "colors": colors.tolist(),
             "labels": labels.astype(int).tolist(),
             "center": center,
+            "total_point_count": total_point_count,
+            "sampled_point_count": int(len(points)),
+            "display_point_limit": max_points,
+            "group_ids": group_ids,
+            "weight_levels": weight_levels,
         }
+        if weight_profile:
+            payload["weight_profile"] = {
+                "profile_id": weight_profile.get("profile_id"),
+                "name": weight_profile.get("name"),
+                "stats": weight_profile.get("stats", {}),
+                "groups": [
+                    {
+                        key: group.get(key)
+                        for key in ("group_id", "name", "level", "color", "enabled")
+                    }
+                    for group in weight_profile.get("groups", [])
+                ],
+            }
+        return payload
 
 
 class Pretreatment:
@@ -101,12 +174,20 @@ class Pretreatment:
         output_dir: str,
         status_key: str = "voxelize",
         manual_route_path: Optional[str] = None,
+        weight_profile: Optional[Dict[str, object]] = None,
     ):
         self.las_path = las_path
         self.output_dir = output_dir
         self.base_name = Path(las_path).stem
         self.status_key = status_key
         self.manual_route_path = manual_route_path
+        self.weight_profile = weight_profile
+        profile_id = str((weight_profile or {}).get("profile_id") or "").strip()
+        self.output_base = (
+            f"{self.base_name}_weighted_{profile_id}"
+            if profile_id
+            else self.base_name
+        )
 
     def run(self):
         update_progress(self.status_key, 5, "读取点云...")
@@ -119,7 +200,12 @@ class Pretreatment:
             raise ValueError("点云中没有可体素化的杆塔或绝缘子目标")
 
         update_progress(self.status_key, 30, "构建语义表面体素...")
-        surface_model = build_semantic_surface_model(points, labels, VOXEL_SIZE)
+        surface_model = build_semantic_surface_model(
+            points,
+            labels,
+            VOXEL_SIZE,
+            weight_profile=self.weight_profile,
+        )
 
         update_progress(self.status_key, 75, "生成多焦段候选视点...")
         candidates = generate_candidate_views(surface_model, manual_route_path=self.manual_route_path)
@@ -127,8 +213,8 @@ class Pretreatment:
             raise ValueError("未生成有效候选视点")
 
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        out_voxel = Path(self.output_dir) / f"{self.base_name}_voxel.npz"
-        out_candidates = Path(self.output_dir) / f"{self.base_name}_candidates.json"
+        out_voxel = Path(self.output_dir) / f"{self.output_base}_voxel.npz"
+        out_candidates = Path(self.output_dir) / f"{self.output_base}_candidates.json"
 
         np.savez_compressed(
             out_voxel,

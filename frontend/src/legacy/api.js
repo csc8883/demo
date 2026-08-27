@@ -1,4 +1,4 @@
-import { state } from './state.js?v=4.3';
+import { state } from './state.js';
 
 // 辅助函数：自动添加认证头
 function getAuthHeaders() {
@@ -128,6 +128,26 @@ export async function fetchWeightEditablePoints(pointCloudName, limit = 120000) 
     return await fetchJsonSafe(
         `/api/weights/${encodeURIComponent(pointCloudName)}/editable-points?limit=${encodeURIComponent(limit)}`
     );
+}
+
+function pointCloudLodQuery(options = {}) {
+    const query = new URLSearchParams();
+    if(options.variant) query.set('variant', options.variant);
+    if(options.profile_id || options.profileId) query.set('profile_id', options.profile_id || options.profileId);
+    const text = query.toString();
+    return text ? `?${text}` : '';
+}
+
+export async function fetchPointCloudLodStatus(pointCloudName, options = {}) {
+    return await fetchJsonSafe(
+        `/api/pointcloud-lod/${encodeURIComponent(pointCloudName)}/status${pointCloudLodQuery(options)}`
+    );
+}
+
+export async function preparePointCloudLod(pointCloudName, options = {}) {
+    return await fetchJsonSafe(`/api/pointcloud-lod/${encodeURIComponent(pointCloudName)}/prepare${pointCloudLodQuery(options)}`, {
+        method: 'POST'
+    });
 }
 
 export async function fetchWeightStatus(pointCloudName) {
