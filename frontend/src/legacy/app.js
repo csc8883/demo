@@ -13,7 +13,10 @@ console.log("App initializing...");
 // 将这些函数直接挂载到 window，确保 HTML onclick 能找到它们
 window.ui = ui;
 window.handleAuth = handleAuth;
-window.logout = () => location.reload(); // 保持硬刷新以清理状态
+window.logout = async () => {
+    await API.logout();
+    location.reload();
+};
 window.executeUpload = executeUpload;
 window.handleFileSelect = handleFileSelect;
 window.runVoxelization = runVoxelization;
@@ -1622,29 +1625,7 @@ async function handleAuth() {
     if(ui.auth.mode === 'login') {
         const res = await API.login(u, p);
         if(res.status === 'success') {
-            // 关键：这里写入的 state 必须与 api.js 读取的 state 是同一个实例
-            state.user = res.data;
-            ui.dropdown.closeAll();
-            document.getElementById('login-modal').classList.add('hidden');
-
-            if(state.user.role === 'admin') {
-                document.getElementById('admin-app').classList.remove('hidden');
-                ui.admin.renderDashboard();
-            } else {
-                document.getElementById('user-app').classList.remove('hidden');
-                setCurrentUserDisplay(state.user.display_name || state.user.name);
-                ui.sidebar.collapse();
-                toggleLayerPanel(false);
-                ui.workflow.setStep('data');
-                ui.inspector.setTab('current');
-                ui.taskCenter.render();
-                loadExportOptions();
-                loadUserProfile().catch((e) => console.warn('加载个人中心失败', e));
-                requestAnimationFrame(() => {
-                    if (Scene.resizeRenderer) Scene.resizeRenderer();
-                    setTimeout(() => Scene.resizeRenderer && Scene.resizeRenderer(), 120);
-                });
-            }
+            enterAuthenticatedWorkspace(res.data);
         } else await showAlert('登录失败', res.message || '用户名或密码不正确。', 'error');
     } else {
         const res = await API.register(u, p);
@@ -2976,3 +2957,40 @@ async function handleRename(cat, oldName) {
     }
 }
 
+
+function enterAuthenticatedWorkspace(user) {
+// 关键：这里写入的 state 必须与 api.js 读取的 state 是同一个实例
+state.user = user;
+document.getElementById('open-admin-dashboard')?.classList.toggle('hidden', user.role !== 'admin');
+ui.dropdown.closeAll();
+document.getElementById('login-modal').classList.add('hidden');
+
+    document.getElementById('user-app').classList.remove('hidden');
+    setCurrentUserDisplay(state.user.display_name || state.user.name);
+    ui.sidebar.collapse();
+    toggleLayerPanel(false);
+    ui.workflow.setStep('data');
+    ui.inspector.setTab('current');
+    ui.taskCenter.render();
+    loadExportOptions();
+    loadUserProfile().catch((e) => console.warn('加载个人中心失败', e));
+    requestAnimationFrame(() => {
+        if (Scene.resizeRenderer) Scene.resizeRenderer();
+        setTimeout(() => Scene.resizeRenderer && Scene.resizeRenderer(), 120);
+    });
+}
+
+API.restoreSession().then(res => {
+    if (res.status === 'success') enterAuthenticatedWorkspace(res.data);
+}).catch(error => console.warn('恢复登录失败', error));
+
+window.openAdminDashboard = () => {
+    if (state.user?.role !== 'admin') return;
+    document.getElementById('user-app').classList.add('hidden');
+    document.getElementById('admin-app').classList.remove('hidden');
+    ui.admin.renderDashboard();
+};
+window.openPlanningWorkspace = () => {
+    document.getElementById('admin-app').classList.add('hidden');
+    document.getElementById('user-app').classList.remove('hidden');
+};

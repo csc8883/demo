@@ -15,7 +15,7 @@ async def get_current_user(
     x_auth_token: Optional[str] = Header(None),
 ) -> str:
     """验证会话 token 并返回当前用户名。未认证时抛出 401。"""
-    username = user_manager.validate_session(x_auth_token)
+    username = user_manager.validate_session(x_auth_token or request.cookies.get('planning_session'))
     if not username:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
     if x_user_name and x_user_name != username:

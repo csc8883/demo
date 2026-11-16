@@ -15,6 +15,9 @@ import hmac
 import json
 import logging
 import secrets
+import sqlite3
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -67,6 +70,8 @@ class UserManager:
         if USER_DATA_DIR.exists():
             changed = False
             for user_dir in USER_DATA_DIR.iterdir():
+                if user_dir.name == 'pointcloud_lod':
+                    continue
                 if not user_dir.is_dir() or user_dir.name in self.users:
                     continue
                 username = safe_filename(user_dir.name).strip()
@@ -134,13 +139,36 @@ class UserManager:
         """Create a bearer-like random session token for frontend headers."""
         token = secrets.token_urlsafe(32)
         self.sessions[token] = username
+        with self._session_db() as db:
+            db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+            db.execute("INSERT INTO sessions VALUES (?, ?, ?)",
+                       (hashlib.sha256(token.encode()).hexdigest(), username, time.time() + 30 * 86400))
         return token
+
+    @contextmanager
+    def _session_db(self):
+        db = sqlite3.connect(str(SYSTEM_FILE.with_suffix('.sessions.sqlite3')))
+        try:
+            with db:
+                db.execute("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT, expires REAL)")
+                yield db
+        finally:
+            db.close()
+
+    def revoke_session(self, token: Optional[str]) -> None:
+        if token:
+            self.sessions.pop(token, None)
+            with self._session_db() as db:
+                db.execute("DELETE FROM sessions WHERE token_hash = ?", (hashlib.sha256(token.encode()).hexdigest(),))
 
     def validate_session(self, token: Optional[str]) -> Optional[str]:
         """Return the username for a session token, or None when invalid."""
         if not token:
             return None
-        return self.sessions.get(token)
+        with self._session_db() as db:
+            row = db.execute("SELECT username FROM sessions WHERE token_hash = ? AND expires > ?",
+                             (hashlib.sha256(token.encode()).hexdigest(), time.time())).fetchone()
+        return row[0] if row and row[0] in self.users else None
 
     def rename_user(self, old_username: str, new_username: str) -> tuple[bool, str]:
         """Rename a local user and move their local data directory."""
@@ -165,6 +193,8 @@ class UserManager:
         for token, username in list(self.sessions.items()):
             if username == old_username:
                 self.sessions[token] = new_username
+        with self._session_db() as db:
+            db.execute('UPDATE sessions SET username=? WHERE username=?', (new_username, old_username))
         self._save()
         return True, new_username
 

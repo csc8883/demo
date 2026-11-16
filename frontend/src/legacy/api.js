@@ -40,6 +40,14 @@ async function fetchJsonSafe(url, options = {}) {
 }
 
 // --- 认证 API ---
+export async function restoreSession() {
+    return await fetchJsonSafe('/api/auth/me');
+}
+
+export async function logout() {
+    return await fetchJsonSafe('/api/auth/logout', { method: 'POST' });
+}
+
 export async function login(username, password) {
     const fd = new FormData();
     fd.append('username', username);

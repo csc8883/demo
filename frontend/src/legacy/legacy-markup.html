@@ -229,6 +229,7 @@
                     </button>
                     <div id="dd-user" class="dropdown-menu hidden absolute right-0 top-full mt-2 bg-white shadow-xl border border-slate-100 rounded-xl w-52 p-2 z-50">
                         <button onclick="openUserCenter()" class="block w-full text-left p-2.5 hover:bg-slate-50 rounded-lg transition text-slate-700">个人中心</button>
+                        <button id="open-admin-dashboard" onclick="openAdminDashboard()" class="hidden block w-full text-left p-2.5">管理后台</button>
                         <button onclick="logout()" class="block w-full text-left p-2.5 hover:bg-red-50 rounded-lg transition text-red-500">退出登录</button>
                     </div>
                 </div>
@@ -594,6 +595,7 @@
                 </button>
             </nav>
             <div class="p-4 border-t border-slate-800">
+                <button onclick="openPlanningWorkspace()" class="w-full py-2">返回航线规划</button>
                 <button onclick="logout()" class="w-full flex items-center justify-center gap-2 text-red-400 hover:bg-red-500/10 py-2 rounded-lg transition text-sm font-medium">
                     <i class="ph-bold ph-sign-out"></i> 退出登录
                 </button>

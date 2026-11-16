@@ -1,4 +1,5 @@
 users.json
+users.sessions.sqlite3*
 logs/
 .idea/
 __pycache__/
