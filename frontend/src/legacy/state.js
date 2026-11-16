@@ -1,6 +1,7 @@
 export const state = {
     user: null, // { name: 'xxx', role: 'admin'/'user' }
     globalOffset: null,
+    coordinateFrame: null,
     activeScene: null,
     activeStep: 'data',
     activeSelection: null,
@@ -52,11 +53,13 @@ export function alignCoordinates(rawPos, fileCenter) {
 
 export function resetCoordinateCenter() {
     state.globalOffset = null;
+    state.coordinateFrame = null;
 }
 
 export function resetState() {
     state.user = null;
     state.globalOffset = null;
+    state.coordinateFrame = null;
     state.activeScene = null;
     state.activeStep = 'data';
     state.activeSelection = null;

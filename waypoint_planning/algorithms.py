@@ -70,6 +70,8 @@ def read_las_for_vis(file_path: str, weight_profile: Optional[Dict[str, object]]
         raise FileNotFoundError(f"文件不存在: {file_path}")
 
     with laspy.open(file_path) as file:
+        from backend.services.inspection_metadata import coordinate_frame, CAMERA_MODEL
+        frame = coordinate_frame(file.header)
         las = file.read()
         points = np.vstack((las.x, las.y, las.z)).transpose()
         labels = np.asarray(las.classification, dtype=int)
@@ -141,6 +143,8 @@ def read_las_for_vis(file_path: str, weight_profile: Optional[Dict[str, object]]
                 weight_levels[point_index] = str(group.get("level") or "normal")
 
         payload = {
+            "coordinate_frame": frame,
+            "camera_model": CAMERA_MODEL,
             "points": points.tolist(),
             "colors": colors.tolist(),
             "labels": labels.astype(int).tolist(),
@@ -192,6 +196,8 @@ class Pretreatment:
     def run(self):
         update_progress(self.status_key, 5, "读取点云...")
         with laspy.open(self.las_path) as file:
+            from backend.services.inspection_metadata import coordinate_frame
+            frame = coordinate_frame(file.header)
             las = file.read()
             points = np.vstack((las.x, las.y, las.z)).transpose()
             labels = np.asarray(las.classification, dtype=int)
@@ -206,6 +212,7 @@ class Pretreatment:
             VOXEL_SIZE,
             weight_profile=self.weight_profile,
         )
+        surface_model.setdefault("meta", {})["coordinate_frame"] = frame
 
         update_progress(self.status_key, 75, "生成多焦段候选视点...")
         candidates = generate_candidate_views(surface_model, manual_route_path=self.manual_route_path)

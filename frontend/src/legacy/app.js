@@ -5,6 +5,7 @@ import * as Scene from './scene.js';
 import { ui } from './ui.js';
 import { getTheme } from './theme.js';
 import { LOD_CLASSIFICATION_PALETTE } from './renderers/semanticStyles.js';
+import { initInspectionPanel } from '../inspection/inspectionPanel.js';
 
 console.log("App initializing...");
 
@@ -980,6 +981,7 @@ async function refreshWeightStatus(pointCloudName = currentWeightPointCloud()) {
 
 function setWeightModeVisible(visible) {
     state.weightCanvasMode = !!visible;
+    if (visible) window.dispatchEvent(new CustomEvent('inspection-suspend'));
     const selecting = visible && state.weightSelection.interaction === 'select';
     const ids = ['weight-left-panel', 'weight-right-panel', 'weight-return-button'];
     ids.forEach((id) => document.getElementById(id)?.classList.toggle('hidden', !visible));
@@ -1590,6 +1592,7 @@ if(container) {
     } catch(e) { console.error("3D Init Error:", e); }
 }
 initializeWeightSelectionOverlay();
+initInspectionPanel();
 
 // 初始化状态
 resetState();
@@ -2125,6 +2128,7 @@ async function handleFileSelect(cat, filename) {
                     });
                 }
                 state.activeScene = filename;
+                state.coordinateFrame = res.data.coordinate_frame || null;
                 await refreshWeightStatus(filename);
                 const totalPointCount = res.data.total_point_count ?? res.data.point_count ?? null;
                 const sampledPointCount = res.data.sampled_point_count ?? res.data.points?.length ?? null;
@@ -2181,7 +2185,7 @@ async function handleFileSelect(cat, filename) {
                 if(res.data.stats) ui.inspector.renderMetrics(res.data.stats);
                 ui.workflow.setStep('route');
                 ui.taskCenter.update(taskId, { status: 'success', progress: 100, detail: `${filename} 已加载` });
-                showOperationResult('航点/航线已加载', '可在右侧检查器查看航点序列和指标。', 'success');
+                showOperationResult('航点/航线已加载', '在左侧切换部件、航点和拍摄动作，调整参数查看拍摄视角。', 'success');
             } else throw new Error(res.message);
         }
     } catch (e) {
@@ -2918,8 +2922,10 @@ async function exportRouteFile(filename) {
 
 // 3D 点选航点后，同步高亮/展开左侧列表
 window.addEventListener('waypoint-click', (e) => {
-    if (!e || !e.detail || !e.detail.id) return;
-    ui.sidebar.expandAndHighlight(e.detail.id, e.detail.fileId || null);
+    if (!e || !e.detail || e.detail.id == null) return;
+    if (document.getElementById('inspection-panel')?.classList.contains('hidden')) {
+        ui.sidebar.expandAndHighlight(e.detail.id, e.detail.fileId || null);
+    }
     const wp = e.detail.waypoint || {};
     const shots = Array.isArray(wp.shots) ? wp.shots : [];
     ui.inspector.select({
@@ -2937,6 +2943,14 @@ window.addEventListener('waypoint-click', (e) => {
             拍摄: `${wp.shot_count || shots.length || 1} 次`
         }
     });
+});
+
+window.addEventListener('inspection-draft-applied', (e) => {
+    const { filename, waypoints } = e.detail;
+    if (ui.sidebar.routeStore[filename]) {
+        ui.sidebar.routeStore[filename].waypoints = waypoints;
+        ui.sidebar.renderAll();
+    }
 });
 
 async function handleDelete(cat, name) {

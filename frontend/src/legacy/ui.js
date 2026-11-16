@@ -443,6 +443,7 @@ export const ui = {
                 methodName: routeType === 'best' ? '算法航点规划' : '人工航点'
             };
             this.renderAll();
+            window.dispatchEvent(new CustomEvent('inspection-route-loaded', { detail: { filename, waypoints: wps, routeType } }));
         },
 
         setRouteMeta(filename, method, methodName) {
@@ -454,6 +455,7 @@ export const ui = {
 
         removeRouteData(filename) {
             delete this.routeStore[filename];
+            window.dispatchEvent(new CustomEvent('inspection-route-removed', { detail: filename }));
             this.renderAll();
         },
 
@@ -571,6 +573,7 @@ export const ui = {
             if(el.closest('.waypoint-item')) el.closest('.waypoint-item').classList.add('selected');
 
             if(follow && Scene && Scene.flyTo) Scene.flyTo({ ...waypoint, fileId });
+            if (options.toggleDetail) window.dispatchEvent(new CustomEvent('waypoint-click', { detail: { id, fileId, waypoint } }));
         },
 
         expandAndHighlight(id, fileId = null) {
@@ -715,6 +718,7 @@ export const ui = {
         },
 
         clearSceneLayers({ resetCenter = false } = {}) {
+            window.dispatchEvent(new CustomEvent('inspection-clear'));
             ['pointcloud', 'route', 'voxel'].forEach((key) => {
                 (state.loadedAssets[key] || []).forEach((asset) => {
                     if(Scene.removeObject) Scene.removeObject(key, asset.id);

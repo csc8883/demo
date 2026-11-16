@@ -1,0 +1,37 @@
+{
+  "sample": "500kV古敬5307线#028.las",
+  "sha256": "431755137f6c03b71c3f6360904d5d836556a824b83424adaf6ef396f77f115f",
+  "checks": {
+    "upload": true,
+    "preprocess": true,
+    "planning_and_visualization": true,
+    "component_shot_identity": true,
+    "world_coordinates_preserved_in_export": true,
+    "route_plan_validate_export": true
+  },
+  "concurrent_status_latency_seconds": 0.001,
+  "waypoint_count": 41,
+  "shot_count": 47,
+  "coverage": {
+    "C_geo": 0.905963,
+    "C_weighted": 0.905848,
+    "C_ins": 0.905473,
+    "stop_reason": "compact_thresholds_met"
+  },
+  "route": {
+    "route_point_count": 53,
+    "totalLen": 957.590842,
+    "detour_point_count": 10,
+    "astar_segment_count": 9,
+    "astar_fallback_count": 0
+  },
+  "safety": {
+    "passed": true,
+    "violation_count": 0,
+    "task_violation_count": 0,
+    "auxiliary_violation_count": 0,
+    "segment_violation_count": 0,
+    "conductor_no_fly_violation_count": 0
+  },
+  "elapsed_seconds": 74.32
+}

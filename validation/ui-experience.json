@@ -1,0 +1,37 @@
+{
+  "date": "2026-11-11",
+  "method": "local browser interaction and screenshots",
+  "viewports": [
+    [
+      1440,
+      900
+    ],
+    [
+      1024,
+      768
+    ]
+  ],
+  "themes": [
+    "light",
+    "dark"
+  ],
+  "checks": [
+    "real point cloud and 41-waypoint result loaded",
+    "insulator instance 3 filters to 2 related waypoints",
+    "multi-shot selection updates camera and parameters",
+    "35mm equivalent focal gives FOV 54.4 by 37.8 degrees",
+    "18m target-locked distance moves waypoint and route line",
+    "free yaw moves target out of frame; relock restores targeting",
+    "world X edit 652571.327 to 652572.327 and undo restores value",
+    "invalid focal rejected and restored on blur",
+    "apply, close, reopen preserves session draft; restore resets original",
+    "scene click selects waypoint 20 without extra side panel",
+    "final console errors/warnings absent"
+  ],
+  "preview_render_ms_single_observation": 2.0,
+  "screenshots": [
+    "inspection-dark.jpg",
+    "inspection-edit-light.jpg"
+  ],
+  "scope": "S0-S2; server-side draft persistence and re-evaluation remain S3"
+}

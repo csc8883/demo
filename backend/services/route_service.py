@@ -78,20 +78,30 @@ def normalize_waypoints(raw_waypoints: list) -> list:
     """将生成的航点 JSON 标准化为前端使用的格式。"""
     waypoints = []
     for index, waypoint in enumerate(raw_waypoints or []):
-        pos = waypoint.get("position", waypoint.get("pos_utm"))
+        pos = waypoint.get("position") or waypoint.get("pos_utm")
         if not pos:
             continue
-        shots = waypoint.get("shots") or []
+        shots = [dict(shot) for shot in (waypoint.get("shots") or [])]
         primary = shots[0] if shots else waypoint
+        source_id = waypoint.get("waypoint_id", waypoint.get("id", index + 1))
+        action = waypoint.get("action", waypoint.get("actionName", "fly"))
+        for shot_index, shot in enumerate(shots):
+            shot.setdefault("shot_id", f"{source_id}:shot:{shot_index + 1}")
+            shot.setdefault("yaw", shot.get("heading", 0))
+            shot.setdefault("f_eq_mm", shot.get("focal_length_eq_mm", 35))
         waypoints.append({
-            "id": index + 1,
+            **waypoint,
+            "id": source_id,
+            "waypoint_id": str(source_id),
+            "sequence": index + 1,
             "pos_utm": pos,
             "pitch": primary.get("pitch", waypoint.get("pitch", 0)),
-            "yaw": primary.get("yaw", waypoint.get("yaw", 0)),
+            "yaw": primary.get("yaw", primary.get("heading", waypoint.get("yaw", 0))),
             "focal_level": primary.get("focal_level", waypoint.get("focal_level")),
-            "f_eq_mm": primary.get("f_eq_mm", waypoint.get("f_eq_mm")),
+            "f_eq_mm": primary.get("f_eq_mm", primary.get("focal_length_eq_mm", waypoint.get("f_eq_mm", 35))),
             "shot_count": len(shots) if shots else int(waypoint.get("shot_count", 1) or 1),
             "shots": shots,
-            "action": waypoint.get("action", "fly"),
+            "action": action,
+            "point_type": waypoint.get("point_type", "task" if action == "photo" or shots else "transit"),
         })
     return waypoints

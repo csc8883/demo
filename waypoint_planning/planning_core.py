@@ -524,11 +524,9 @@ def get_direction_vector(yaw: float, pitch: float) -> np.ndarray:
 
 def camera_basis(yaw: float, pitch: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     forward = get_direction_vector(yaw, pitch)
-    world_up = np.array([0.0, 0.0, 1.0], dtype=float)
-    right = np.cross(forward, world_up)
-    if np.linalg.norm(right) <= 1e-8:
-        right = np.array([1.0, 0.0, 0.0], dtype=float)
-    right = normalize_vector(right)
+    # Preserve roll/heading even at +/-90 pitch; matches the preview camera.
+    heading_rad = math.radians(yaw)
+    right = np.array([math.cos(heading_rad), -math.sin(heading_rad), 0.0], dtype=float)
     up = normalize_vector(np.cross(right, forward))
     return forward, right, up
 
@@ -537,7 +535,7 @@ def yaw_pitch_to_target(position: Sequence[float], target: Sequence[float]) -> T
     vec = np.asarray(target, dtype=float) - np.asarray(position, dtype=float)
     horizontal = math.hypot(float(vec[0]), float(vec[1]))
     yaw = (90.0 - math.degrees(math.atan2(float(vec[1]), float(vec[0])))) % 360.0
-    pitch = math.degrees(math.atan2(float(vec[2]), max(horizontal, 1e-6)))
+    pitch = math.degrees(math.atan2(float(vec[2]), horizontal))
     return yaw, pitch
 
 
@@ -555,7 +553,7 @@ def compute_view_geometry(position: Sequence[float], look_at: Sequence[float]) -
     return {
         "Distance": float(np.linalg.norm(vec)),
         "heading": (90.0 - math.degrees(math.atan2(float(vec[1]), float(vec[0])))) % 360.0,
-        "pitch": math.degrees(math.atan2(float(vec[2]), max(horizontal, 1e-6))),
+        "pitch": math.degrees(math.atan2(float(vec[2]), horizontal)),
     }
 
 
@@ -670,6 +668,15 @@ def normalize_focal_level(focal_level: Optional[str] = None, f_eq_mm: Optional[f
         return nearest[0], nearest[1]
     first = next(iter(SUPPORTED_FOCALS.items()))
     return first[0], first[1]
+
+
+def view_fov(f_eq_mm: float) -> Tuple[float, float]:
+    """Project 35mm-equivalent focal length against its equivalent 36x24mm frame."""
+    focal = float(f_eq_mm)
+    if not math.isfinite(focal) or focal <= 0:
+        raise ValueError("Equivalent focal length must be positive and finite")
+    return (math.degrees(2 * math.atan(CAMERA_SENSOR_WIDTH_MM / (2 * focal))),
+            math.degrees(2 * math.atan(CAMERA_SENSOR_HEIGHT_MM / (2 * focal))))
 
 
 def check_occlusion(observer_pos, target_pos, z_max_map, min_bound, cell_size) -> bool:
@@ -4514,6 +4521,11 @@ def _normalize_voxel_record(raw_voxel, local_center: np.ndarray, z_min: float, z
 class PlanningEnvironment:
     def __init__(self, voxel_path: str):
         data = np.load(voxel_path, allow_pickle=True)
+        try:
+            metadata = json.loads(str(data['meta_json'].item())) if 'meta_json' in data.files else {}
+        except (ValueError, TypeError):
+            metadata = {}
+        self.coordinate_frame = metadata.get('coordinate_frame')
         raw_voxels = data["voxels"]
         coords_preview = []
         for raw_voxel in raw_voxels:
@@ -5564,8 +5576,9 @@ class VisibilityEngine:
 
         focal_key, focal_cfg = normalize_focal_level(focal_level, f_eq_mm)
         f_eq_mm = float(f_eq_mm or focal_cfg["f_eq_mm"])
-        hfov_deg = float(hfov_deg or focal_cfg["hfov_deg"])
-        vfov_deg = float(vfov_deg or focal_cfg["vfov_deg"])
+        projected_hfov, projected_vfov = view_fov(f_eq_mm)
+        hfov_deg = float(hfov_deg or projected_hfov)
+        vfov_deg = float(vfov_deg or projected_vfov)
 
         position = np.asarray(position, dtype=float)
         vectors = self.env.attention_coords - position
@@ -5625,8 +5638,9 @@ class VisibilityEngine:
 
         focal_key, focal_cfg = normalize_focal_level(focal_level, f_eq_mm)
         f_eq_mm = float(f_eq_mm or focal_cfg["f_eq_mm"])
-        hfov_deg = float(hfov_deg or focal_cfg["hfov_deg"])
-        vfov_deg = float(vfov_deg or focal_cfg["vfov_deg"])
+        projected_hfov, projected_vfov = view_fov(f_eq_mm)
+        hfov_deg = float(hfov_deg or projected_hfov)
+        vfov_deg = float(vfov_deg or projected_vfov)
 
         position = np.asarray(position, dtype=float)
         vectors = self.env.target_coords - position

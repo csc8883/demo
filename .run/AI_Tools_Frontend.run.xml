@@ -1,0 +1,14 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="AI Tools Frontend (5173)" type="js.build_tools.npm" singleton="true">
+    <package-json value="$PROJECT_DIR$/../ai_tools/llm-graph-builder/frontend/package.json" />
+    <command value="run" />
+    <scripts>
+      <script value="dev" />
+    </scripts>
+    <arguments value="-- --host 127.0.0.1 --port 5173 --strictPort" />
+    <node-interpreter value="D:/nodejs/node.exe" />
+    <package-manager value="npm" />
+    <envs />
+    <method v="2" />
+  </configuration>
+</component>

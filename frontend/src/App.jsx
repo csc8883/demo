@@ -2,6 +2,8 @@ import { useCallback, useLayoutEffect, useState } from 'react';
 import legacyMarkup from './legacy/legacy-markup.html?raw';
 import { bootApp } from './legacy/appController.js';
 import { applyTheme, readStoredTheme } from './legacy/theme.js';
+import AssistantPet from './linkage/AssistantPet.jsx';
+import { PortalArrival } from './linkage/SystemPortal.jsx';
 
 function bodyClassName(theme) {
   return [
@@ -41,5 +43,5 @@ export default function App() {
     });
   }, []);
 
-  return <div className="legacy-app-root" dangerouslySetInnerHTML={{ __html: legacyMarkup }} />;
+  return <><div className="legacy-app-root" dangerouslySetInnerHTML={{ __html: legacyMarkup }} /><AssistantPet /><PortalArrival /></>;
 }

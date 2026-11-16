@@ -2213,7 +2213,17 @@ class BasePlanner:
                     "hfov_deg": round(float(candidate.hfov_deg), 3),
                     "vfov_deg": round(float(candidate.vfov_deg), 3),
                     "semantic_focus": candidate.semantic_focus,
+                    "candidate_id": int(candidate.id),
+                    "target_id": getattr(candidate, "target_id", None),
+                    "instance_id": getattr(candidate, "instance_id", None),
                 }
+                semantic = str(candidate.semantic_focus)
+                instance_id = getattr(candidate, "instance_id", None)
+                target_id = getattr(candidate, "target_id", None)
+                if instance_id is not None:
+                    shot_dict["component_id"] = f"{semantic}:instance:{instance_id}"
+                elif target_id is not None:
+                    shot_dict["component_id"] = f"{semantic}:target:{target_id}"
                 if getattr(candidate, "action_name", None) is not None:
                     shot_dict["actionName"] = candidate.action_name
                 if getattr(candidate, "aim_type", None) is not None:
@@ -2522,6 +2532,8 @@ class BasePlanner:
             "uncovered_summary": coverage.get("uncovered_summary", {}),
             "uncovered_voxels": coverage.get("uncovered_voxels", []),
         }
+        if self.env.coordinate_frame:
+            payload["coordinate_frame"] = self.env.coordinate_frame
         if extra_payload:
             payload.update(extra_payload)
 

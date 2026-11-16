@@ -7,6 +7,7 @@ import { ThreePointsRenderer } from './renderers/threePointsRenderer.js';
 import { PotreeLodRenderer } from './renderers/potreeLodRenderer.js';
 import { PointCloudLayerController } from './renderers/pointCloudLayerController.js';
 import { semanticColorOf, semanticKindOf, SEMANTIC_KIND } from './renderers/semanticStyles.js';
+import { direction, optics, localPosition } from '../inspection/cameraModel.js';
 
 window.THREE = THREE;
 
@@ -14,6 +15,13 @@ let scene, camera, renderer, controls, raycaster, mouse, viewportContainer;
 let perspectiveCamera = null;
 let weightOrthographicCamera = null;
 let animationId;
+let inspection = null;
+let inspectionOverlay = null;
+let previewTarget = null;
+let previewCamera = null;
+let previewPixels = null;
+let previewImage = null;
+let lastPreviewFrame = 0;
 let pointSizeScale = 1;
 let globalOpacity = 1;
 let weightViewTool = 'box3d';
@@ -249,7 +257,13 @@ export function init3D() {
     applySceneTheme();
 
     // Interaction
-    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    let pointerStart = null;
+    renderer.domElement.addEventListener('pointerdown', e => { pointerStart = e.button === 0 ? [e.clientX, e.clientY] : null; });
+    renderer.domElement.addEventListener('pointerup', e => {
+        if (pointerStart && Math.hypot(e.clientX - pointerStart[0], e.clientY - pointerStart[1]) < 5) onPointerDown(e);
+        pointerStart = null;
+    });
+    renderer.domElement.addEventListener('pointercancel', () => { pointerStart = null; });
     window.addEventListener('resize', () => resizeRenderer());
     requestAnimationFrame(() => resizeRenderer());
 
@@ -261,6 +275,7 @@ function animate() {
     controls.update();
     updatePointCloudRenderers();
     renderSceneFrame();
+    renderInspectionPreview();
 }
 
 function updatePointCloudRenderers() {
@@ -364,6 +379,7 @@ function onPointerDown(event) {
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     raycaster.setFromCamera(mouse, camera);
+    raycaster.layers.set(SCENE_LAYERS.BUSINESS_OVERLAY);
 
     // Check intersections with all route waypoints
     const interactables = [];
@@ -372,9 +388,22 @@ function onPointerDown(event) {
     });
 
     const intersects = raycaster.intersectObjects(interactables);
-    if (intersects.length > 0) {
-        const obj = intersects[0].object;
-        if (obj.userData && obj.userData.id) {
+    let picked = intersects[0]?.object;
+    // A small screen-space target remains usable when the full route is zoomed out.
+    if (!picked) {
+        let closest = 11;
+        for (const object of interactables) {
+            const screen = object.position.clone().project(camera);
+            if (screen.z < -1 || screen.z > 1) continue;
+            const x = (screen.x + 1) * rect.width / 2 + rect.left;
+            const y = (1 - screen.y) * rect.height / 2 + rect.top;
+            const d = Math.hypot(event.clientX - x, event.clientY - y);
+            if (d < closest) { closest = d; picked = object; }
+        }
+    }
+    if (picked) {
+        const obj = picked;
+        if (obj.userData && obj.userData.id != null) {
             // Dispatch custom event for UI to handle
             window.dispatchEvent(new CustomEvent('waypoint-click', { detail: obj.userData }));
         }
@@ -394,15 +423,9 @@ export function flyTo(pos) {
     let targetPoint = focusPoint.clone();
     let cameraPoint = focusPoint.clone().add(new THREE.Vector3(18, -18, 18));
     if (Number.isFinite(yaw)) {
-        const yawRad = (90 - yaw) * Math.PI / 180;
-        const pitchRad = Number.isFinite(pitch) ? pitch * Math.PI / 180 : 0;
-        const direction = new THREE.Vector3(
-            Math.cos(pitchRad) * Math.cos(yawRad),
-            Math.cos(pitchRad) * Math.sin(yawRad),
-            Math.sin(pitchRad)
-        ).normalize();
-        targetPoint = focusPoint.clone().add(direction.clone().multiplyScalar(18));
-        cameraPoint = focusPoint.clone().add(direction.clone().multiplyScalar(-12)).add(new THREE.Vector3(0, 0, 2.5));
+        const forward = new THREE.Vector3(...direction(yaw, Number.isFinite(pitch) ? pitch : 0));
+        targetPoint = focusPoint.clone().add(forward.clone().multiplyScalar(18));
+        cameraPoint = focusPoint.clone().add(forward.clone().multiplyScalar(-12)).add(new THREE.Vector3(0, 0, 2.5));
     }
 
     gsap.to(controls.target, { x: targetPoint.x, y: targetPoint.y, z: targetPoint.z, duration: 1 });
@@ -1083,6 +1106,7 @@ export function renderRoute(waypoints, id, type='manual') {
 
     const group = new THREE.Group();
     const pts = [];
+    group.userData.markers = new Map();
 
     waypoints.forEach(wp => {
         const posArr = alignCoordinates(wp.pos_utm, null);
@@ -1111,19 +1135,22 @@ export function renderRoute(waypoints, id, type='manual') {
             waypoint: { ...wp, fileId: id, routeType: type }
         };
         group.add(sphere);
+        const marker = { sphere };
+        group.userData.markers.set(String(wp.waypoint_id ?? wp.id), marker);
 
         // Number Label (Sprite)
         if(isTask) {
             const label = createNumberSprite(wp.id);
             label.position.copy(pos).add(new THREE.Vector3(0, 0, 2)); // Float above
             group.add(label);
+            marker.label = label;
         }
 
         // Direction Arrow
         if(wp.yaw !== undefined) {
              const arrow = createArrow(pos, wp.pitch, wp.yaw, isTask ? 0x22c55e : 0x94a3b8);
              group.add(arrow);
-             if(isTask) group.add(createCameraFrustum(pos, wp.pitch || 0, wp.yaw || 0, type === 'manual' ? 0xc7446f : 0x0f8f7a));
+             marker.arrow = arrow;
         }
     });
 
@@ -1134,12 +1161,126 @@ export function renderRoute(waypoints, id, type='manual') {
         new THREE.LineBasicMaterial({color: routeColor, linewidth: 2})
     );
     group.add(line);
+    group.userData.waypoints = waypoints;
+    group.userData.routeLine = line;
 
     setLayerRecursive(group, SCENE_LAYERS.BUSINESS_OVERLAY);
     scene.add(group);
     activeObjects.route[id] = group;
 
     if(type === 'best') fitCamera(group);
+}
+
+// Keep geometry and resources stable while sliders move; update only the edited marker and polyline.
+export function updateInspectionWaypoint(fileId, waypoint) {
+    const group = activeObjects.route[fileId];
+    if (!group) return;
+    const key = String(waypoint.waypoint_id ?? waypoint.id);
+    const marker = group.userData.markers?.get(key);
+    if (!marker) return;
+    const p = new THREE.Vector3(...localPosition(waypoint.pos_utm, state.globalOffset || [0, 0, 0]));
+    marker.sphere.position.copy(p);
+    marker.sphere.userData.waypoint = { ...waypoint, fileId };
+    Object.assign(marker.sphere.userData, { pos: waypoint.pos_utm, pos_utm: waypoint.pos_utm, yaw: waypoint.yaw, pitch: waypoint.pitch });
+    marker.label?.position.copy(p).add(new THREE.Vector3(0, 0, 2));
+    if (marker.arrow) {
+        marker.arrow.position.copy(p);
+        marker.arrow.setDirection(new THREE.Vector3(...direction(waypoint.yaw, waypoint.pitch)));
+    }
+    const index = group.userData.waypoints.findIndex(w => String(w.waypoint_id ?? w.id) === key);
+    group.userData.waypoints[index] = waypoint;
+    const line = group.userData.routeLine;
+    if (line && index >= 0) {
+        line.geometry.attributes.position.setXYZ(index, p.x, p.y, p.z);
+        line.geometry.attributes.position.needsUpdate = true;
+        line.geometry.computeBoundingSphere();
+    }
+}
+
+export function setInspectionView(options = null) {
+    inspection = options;
+    if (inspectionOverlay) { disposeObject3D(inspectionOverlay); inspectionOverlay = null; }
+    if (!options || !scene) {
+        previewTarget?.dispose(); previewTarget = null; previewPixels = null; previewImage = null;
+        return;
+    }
+    const { waypoint: wp, shot } = options;
+    const group = new THREE.Group();
+    const pos = new THREE.Vector3(...localPosition(wp.pos_utm, state.globalOffset || [0, 0, 0]));
+    const ring = new THREE.Mesh(new THREE.SphereGeometry(1.25, 16, 12), new THREE.MeshBasicMaterial({ color: 0x38e8c6, wireframe: true, transparent: true, opacity: 0.9 }));
+    ring.position.copy(pos); group.add(ring);
+    if (options.componentTargets?.length) {
+        const box = new THREE.Box3().setFromPoints(options.componentTargets.map(t => new THREE.Vector3(...localPosition(t, state.globalOffset || [0, 0, 0]))));
+        box.expandByScalar(0.65);
+        group.add(new THREE.Box3Helper(box, 0xffc66d));
+    }
+    if (shot) {
+        const distance = shot.look_at ? pos.distanceTo(new THREE.Vector3(...localPosition(shot.look_at, state.globalOffset || [0, 0, 0]))) : 10;
+        group.add(createCameraFrustum(pos, shot.pitch, shot.yaw, 0x38e8c6, shot.f_eq_mm, distance));
+        if (shot.look_at) {
+            const target = new THREE.Vector3(...localPosition(shot.look_at, state.globalOffset || [0, 0, 0]));
+            const targetMarker = new THREE.Mesh(new THREE.SphereGeometry(0.45, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffc66d }));
+            targetMarker.position.copy(target); group.add(targetMarker);
+            group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pos, target]), new THREE.LineDashedMaterial({ color: 0xffc66d, dashSize: 0.8, gapSize: 0.4 })));
+            group.children.at(-1).computeLineDistances();
+        }
+    }
+    setLayerRecursive(group, SCENE_LAYERS.BUSINESS_OVERLAY);
+    scene.add(group); inspectionOverlay = group;
+    lastPreviewFrame = 0;
+}
+
+function renderInspectionPreview() {
+    if (!inspection?.shot || !inspection.canvas?.isConnected || inspection.canvas.offsetWidth === 0 || performance.now() - lastPreviewFrame < 125) return;
+    lastPreviewFrame = performance.now();
+    const previewStarted = lastPreviewFrame;
+    const { waypoint: wp, shot, canvas, onStatus } = inspection;
+    const visibleCloud = [...pointCloudControllers.values()].some(c => c.desiredVisible);
+    if (!visibleCloud && !hasVisibleVoxelOverlay()) { onStatus?.('empty'); return; }
+    const width = 360, height = 240;
+    if (!previewTarget) {
+        previewTarget = new THREE.WebGLRenderTarget(width, height);
+        previewCamera = new THREE.PerspectiveCamera(40, 1.5, 0.1, 2000);
+        previewPixels = new Uint8Array(width * height * 4);
+        previewImage = new ImageData(width, height);
+    }
+    const oldTarget = renderer.getRenderTarget(), oldClear = renderer.autoClear;
+    const oldBackground = scene.background, oldFog = scene.fog;
+    try {
+        const pos = localPosition(wp.pos_utm, state.globalOffset || [0, 0, 0]);
+        previewCamera.position.set(...pos);
+        // Heading-derived up avoids singularities for straight-down shots.
+        const forward = new THREE.Vector3(...direction(shot.yaw, shot.pitch));
+        const right = new THREE.Vector3(Math.cos(shot.yaw * Math.PI / 180), -Math.sin(shot.yaw * Math.PI / 180), 0);
+        previewCamera.up.crossVectors(right, forward).normalize();
+        previewCamera.lookAt(previewCamera.position.clone().add(forward));
+        previewCamera.fov = optics(shot.f_eq_mm).vfov_deg;
+        previewCamera.updateProjectionMatrix(); previewCamera.updateMatrixWorld(true);
+        previewCamera.layers.mask = (1 << SCENE_LAYERS.BASE_POINT) | (visibleCloud ? 0 : (1 << SCENE_LAYERS.BUSINESS_OVERLAY));
+        // Reuse the same point-cloud objects and GPU context. No second data download or renderer.
+        pointCloudControllers.forEach(c => c.update(previewCamera, renderer));
+        getPotreePointClouds().forEach(cloud => {
+            if (cloud.material) { cloud.material.screenWidth = width; cloud.material.screenHeight = height; }
+        });
+        renderer.setRenderTarget(previewTarget); renderer.autoClear = true;
+        scene.background = new THREE.Color(0x09121b); scene.fog = null;
+        renderer.render(scene, previewCamera);
+        renderer.readRenderTargetPixels(previewTarget, 0, 0, width, height, previewPixels);
+        for (let row = 0; row < height; row++) previewImage.data.set(previewPixels.subarray((height - 1 - row) * width * 4, (height - row) * width * 4), row * width * 4);
+        if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+        canvas.getContext('2d').putImageData(previewImage, 0, 0);
+        canvas.dataset.previewRenderMs = (performance.now() - previewStarted).toFixed(1);
+        onStatus?.(visibleCloud ? 'ready' : 'voxel');
+    } catch (error) {
+        console.error('Inspection preview failed', error);
+        onStatus?.('error');
+        inspection = null;
+    } finally {
+        renderer.setRenderTarget(oldTarget); renderer.autoClear = oldClear;
+        scene.background = oldBackground; scene.fog = oldFog;
+        // Restore main-camera LOD selection before the next main frame.
+        updatePointCloudRenderers();
+    }
 }
 
 export function renderVoxels(data, center, id) {
@@ -1365,28 +1506,18 @@ export function renderSafetyViolations(result = {}) {
 }
 
 function createArrow(pos, pitch, yaw, color=0x00ff00) {
-    const yawRad = (90 - yaw) * Math.PI / 180;
-    const pitchRad = pitch * Math.PI / 180;
-    const x = Math.cos(pitchRad) * Math.cos(yawRad);
-    const y = Math.cos(pitchRad) * Math.sin(yawRad);
-    const z = Math.sin(pitchRad);
+    const [x, y, z] = direction(yaw, pitch);
     return new THREE.ArrowHelper(new THREE.Vector3(x, y, z).normalize(), pos, 3, color, 0.6, 0.4);
 }
 
-function createCameraFrustum(pos, pitch, yaw, color=0x0f8f7a) {
-    const yawRad = (90 - yaw) * Math.PI / 180;
-    const pitchRad = pitch * Math.PI / 180;
-    const forward = new THREE.Vector3(
-        Math.cos(pitchRad) * Math.cos(yawRad),
-        Math.cos(pitchRad) * Math.sin(yawRad),
-        Math.sin(pitchRad)
-    ).normalize();
-    const up = new THREE.Vector3(0, 0, 1);
-    const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+function createCameraFrustum(pos, pitch, yaw, color=0x0f8f7a, focal=35, distance=6) {
+    const forward = new THREE.Vector3(...direction(yaw, pitch));
+    const right = new THREE.Vector3(Math.cos(yaw * Math.PI / 180), -Math.sin(yaw * Math.PI / 180), 0);
     const realUp = new THREE.Vector3().crossVectors(right, forward).normalize();
-    const length = 6;
-    const width = 2.6;
-    const height = 1.8;
+    const length = Math.max(1, Math.min(distance, 60));
+    const fov = optics(focal);
+    const width = length * Math.tan(fov.hfov_deg * Math.PI / 360);
+    const height = length * Math.tan(fov.vfov_deg * Math.PI / 360);
     const center = pos.clone().add(forward.clone().multiplyScalar(length));
     const corners = [
         center.clone().add(right.clone().multiplyScalar(width)).add(realUp.clone().multiplyScalar(height)),

@@ -10,6 +10,7 @@ import './styles/ui-refresh.css';
 import './styles/weight-profile.css';
 import './styles/react-shell.css';
 import './styles/theme-dark.css';
+import './styles/inspection.css';
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>

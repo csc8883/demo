@@ -18,7 +18,7 @@ router = APIRouter(tags=["routes"])
 
 
 @router.post("/api/route/plan")
-async def plan_route(
+def plan_route(
     waypoint_filename: str = Form(...),
     safety_distance_m: Optional[float] = Form(None),
     clearance_m: Optional[float] = Form(None),
@@ -73,7 +73,7 @@ async def plan_route(
 
 
 @router.post("/api/route/validate")
-async def validate_route(
+def validate_route(
     category: str = Form("algorithm_route"),
     filename: str = Form(...),
     safety_distance_m: Optional[float] = Form(None),

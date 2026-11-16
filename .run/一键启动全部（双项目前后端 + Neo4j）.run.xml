@@ -1,0 +1,9 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="一键启动全部（双项目前后端 + Neo4j）" type="CompoundRunConfigurationType" singleton="true">
+    <toRun name="AI Tools Frontend (5173)" type="js.build_tools.npm" />
+    <toRun name="Frontend Vite (5174)" type="js.build_tools.npm" />
+    <toRun name="AI Tools Backend + Neo4j (8010)" type="PythonConfigurationType" />
+    <toRun name="Backend FastAPI (8000)" type="PythonConfigurationType" />
+    <method v="2" />
+  </configuration>
+</component>

@@ -27,7 +27,7 @@ router = APIRouter(tags=["visualization"])
 
 
 @router.get("/api/visualize/pointcloud")
-async def get_pointcloud(filename: str, username: str = Depends(get_current_user)):
+def get_pointcloud(filename: str, username: str = Depends(get_current_user)):
     point_cloud = find_user_file(username, "point_cloud", filename)
     if not point_cloud:
         return {"status": "error", "message": "File not found"}
@@ -44,7 +44,7 @@ async def get_pointcloud(filename: str, username: str = Depends(get_current_user
 
 
 @router.get("/api/visualize/result")
-async def get_result(
+def get_result(
     type: str = Query(...),
     filename: str = Query(...),
     username: str = Depends(get_current_user),
@@ -127,6 +127,9 @@ async def get_result(
                 "method_name": result.get("method_name", "算法航点"),
                 "stats": stats,
             }
+            from backend.services.inspection_metadata import coordinate_frame, CAMERA_MODEL
+            payload["coordinate_frame"] = result.get("coordinate_frame") or coordinate_frame()
+            payload["camera_model"] = CAMERA_MODEL
             for key in ("planning_input", "route_context", "tower_results"):
                 if key in result:
                     payload[key] = result[key]
